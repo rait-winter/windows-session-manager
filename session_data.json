@@ -1,0 +1,20 @@
+{
+    "上次会话": [
+        {
+            "type": "application",
+            "title": "会话管理器",
+            "path": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python39\\python.exe"
+        },
+        {
+            "type": "application",
+            "title": "README.md - 20250605 - Cursor [Administrator]",
+            "path": "D:\\Users\\Administrator\\AppData\\Local\\Programs\\cursor\\Cursor.exe"
+        },
+        {
+            "type": "browser",
+            "title": "picture_to_code - 工作流 -智能体平台 - Google Chrome",
+            "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "urls": []
+        }
+    ]
+}
