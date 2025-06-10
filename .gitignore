@@ -1,0 +1,32 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 构建产物
+dist/
+build/
+*.exe
+*.bak
+*.pkg
+*.pyz
+*.toc
+*.zip
+*.html
+*.txt
+
+# 日志和本地配置
+resources/session_manager.log
+resources/config.json
+
+# IDE/编辑器相关
+.vscode/
+.idea/
+*.swp
+
+# 测试数据
+/tests/*.json
+/tests/*.bak
+
+# 其他
+.DS_Store
+Thumbs.db 

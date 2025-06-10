@@ -1,3 +1,35 @@
+# docs 目录说明
+
+本目录用于存放项目相关的文档资料，包括但不限于：
+
+- 安装说明（INSTALL.md）
+- 使用手册（USAGE.md）
+- 常见问题（FAQ.md）
+- 更新日志（CHANGELOG.md）
+- 开发者文档（DEVELOPER.md）
+- 其它开发、维护、贡献相关文档
+
+建议文档结构如下：
+
+```
+docs/
+├── README.md         # 本说明文件
+├── INSTALL.md        # 安装与环境配置说明
+├── USAGE.md          # 详细使用说明
+├── FAQ.md            # 常见问题解答
+├── CHANGELOG.md      # 版本更新日志
+├── DEVELOPER.md      # 开发者文档
+```
+
+## 文档维护建议
+- 所有文档请使用 Markdown 格式（.md）。
+- 文档内容应简明扼要，便于查阅和维护。
+- 重要变更请同步更新 CHANGELOG.md。
+- 欢迎通过 Pull Request 或 Issue 参与文档完善。
+- 命名规范：文档名建议全大写、下划线分隔，便于识别。
+
+如需补充其它文档，请在本目录下新建相应文件。 
+
 # Windows 会话管理器
 
 ## 项目简介
@@ -103,3 +135,29 @@ python D:\project\SessionManager\get_windows.py
 ## 许可证
 
 本项目采用 [MIT 许可证](LICENSE)。
+
+## 目录结构
+
+```
+windows-session-manager/
+├── get_windows.py              # 主程序入口（后续将精简为仅启动）
+├── session_manager/            # 业务逻辑包（核心代码将迁移至此）
+│   ├── __init__.py
+│   ├── core.py                 # 会话采集/恢复等核心逻辑
+│   ├── gui.py                  # Tkinter界面相关
+│   ├── config.py               # 配置管理
+│   ├── utils.py                # 工具函数
+├── resources/                  # 图标、图片、样式等资源
+├── tests/                      # 单元测试
+├── docs/                       # 文档目录
+│   ├── README.md
+│   ├── INSTALL.md
+│   ├── USAGE.md
+│   ├── FAQ.md
+│   └── CHANGELOG.md
+├── config.json                 # 默认配置文件
+├── requirements.txt            # 依赖包列表
+├── setup.py                    # （可选）打包/安装脚本
+├── LICENSE
+└── .gitignore
+```

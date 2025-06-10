@@ -1,0 +1,35 @@
+{
+    "exclude_process_paths": [
+        "c:\\windows\\system32\\svchost.exe",
+        "c:\\windows\\explorer.exe",
+        "c:\\windows\\system32\\dwm.exe",
+        "c:\\windows\\system32\\conhost.exe",
+        "c:\\windows\\systemapps\\microsoft.windows.startmenuexperiencehost_cw5n1h2txyewy\\startmenuexperiencehost.exe",
+        "c:\\windows\\system32\\runtimebroker.exe",
+        "c:\\program files\\windowsapps\\microsoft.windowsterminal_8wekyb3d8bbwe\\wt.exe",
+        "c:\\program files\\windowsapps\\microsoft.windowsterminal_8wekyb3d8bbwe\\windowsterminal.exe",
+        "c:\\users\\administrator\\appdata\\local\\programs\\python\\python39\\python.exe"
+    ],
+    "exclude_window_titles": [
+        "Program Manager",
+        "Default IME",
+        "MSCTFIME UI",
+        "NVIDIA GeForce Overlay",
+        "Settings",
+        "Microsoft Text Input Application",
+        "dummyLayeredWnd"
+    ],
+    "browser_executables": [
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe"
+    ],
+    "session_data_file_name": "sessions.json",
+    "log_file_name": "session_manager.log",
+    "window_title_similarity_threshold": 0.7,
+    "restore_delay_seconds": 0.1,
+    "backup_session_data": true,
+    "startup_delay_seconds": 2
+}
