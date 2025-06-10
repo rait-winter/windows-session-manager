@@ -18,6 +18,10 @@ build/
 resources/session_manager.log
 resources/config.json
 
+# 会话数据文件
+session_manager/sessions.json
+*.json.bak
+
 # IDE/编辑器相关
 .vscode/
 .idea/
