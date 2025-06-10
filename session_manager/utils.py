@@ -66,13 +66,34 @@ def is_window_relevant(window, config):
     """判断窗口是否为需要保存的应用窗口，返回进程路径或 False。"""
     if not window or not hasattr(window, 'visible') or not hasattr(window, 'title') or not hasattr(window, '_hWnd'):
         return False
-    if not window.visible or not window.title:
-        return False
+        
+    # 特殊应用可能没有可见属性或标题，但仍然需要保存
+    special_app_names = ['everything', 'pixpin', 'fastorange']
+    
+    # 检查窗口标题是否包含特殊应用名称
+    is_special_app = False
+    if hasattr(window, 'title') and window.title:
+        for app_name in special_app_names:
+            if app_name.lower() in window.title.lower():
+                is_special_app = True
+                break
+    
+    # 如果不是特殊应用，则应用标准过滤规则
+    if not is_special_app:
+        if not window.visible or not window.title:
+            return False
+            
     exclude_window_titles = config.get("exclude_window_titles", [])
     if window.title.lower() in [t.lower() for t in exclude_window_titles]:
         return False
+        
     process_path = get_process_path_from_hwnd(window._hWnd)
     if process_path:
+        # 检查进程路径是否包含特殊应用名称
+        for app_name in special_app_names:
+            if app_name.lower() in os.path.basename(process_path).lower():
+                return process_path  # 如果是特殊应用，直接返回路径
+                
         exclude_process_paths = config.get("exclude_process_paths", [])
         if process_path.lower() in [p.lower() for p in exclude_process_paths]:
             return False
