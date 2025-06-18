@@ -17,7 +17,7 @@ from functools import partial
 import webbrowser
 from ttkthemes import ThemedTk
 import keyboard
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 import winshell
 import pygetwindow as gw
 from session_manager.utils import get_process_path_from_hwnd
@@ -109,14 +109,21 @@ class GuiLogHandler(logging.Handler):
 
 class SessionManagerApp:
     def __init__(self, root, config, session_manager):
+        """初始化GUI"""
         self.root = root
         self.config = config
         self.session_manager = session_manager
-        self.current_session_name = self.session_manager.get_session_names()[0]
-        self.current_session_items = self.session_manager.get_session(self.current_session_name)
-        root.title("会话管理器")
-        root.geometry("900x600")
-        root.minsize(700, 500)
+        self.current_session_name = None
+        
+        # 设置主题
+        self.setup_theme()
+        
+        # 设置图标
+        self.setup_icons()
+        
+        # 创建主框架
+        self.main_frame = ttk.Frame(root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # 美化界面
         style = ttk.Style()
@@ -720,3 +727,104 @@ class SessionManagerApp:
         self.log_text.insert(tk.END, message + '\n', tag)
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled') 
+
+    def update_window_list(self):
+        """更新窗口列表"""
+        if not self.current_session_name:
+            return
+            
+        # 清空列表
+        for i in self.window_listbox.get_children():
+            self.window_listbox.delete(i)
+            
+        # 获取当前会话数据
+        session_data = self.session_manager.get_session_data(self.current_session_name)
+        if not session_data:
+            return
+            
+        # 添加窗口到列表
+        for i, window_info in enumerate(session_data):
+            window_type = window_info.get("type", "unknown")
+            window_title = window_info.get("title", "未知窗口")
+            window_path = window_info.get("path", "")
+            
+            icon = self.get_icon_for_type(window_type)
+            
+            # 检查是否有标签页数据
+            urls = window_info.get("urls", [])
+            has_tabs = len(urls) > 0
+            
+            # 添加主窗口条目
+            item_id = self.window_listbox.insert("", "end", text=window_title, 
+                                           values=(window_type, window_path),
+                                           image=icon)
+                                           
+            # 如果是浏览器且有标签页数据，添加子条目
+            if window_type == "browser" and has_tabs:
+                # 最多显示10个标签页，避免界面过于拥挤
+                max_tabs_to_show = min(10, len(urls))
+                
+                for j in range(max_tabs_to_show):
+                    tab = urls[j]
+                    tab_title = tab.get("title", "无标题")
+                    tab_url = tab.get("url", "")
+                    
+                    # 截断过长的标题
+                    if len(tab_title) > 50:
+                        tab_title = tab_title[:47] + "..."
+                        
+                    # 添加标签页子条目
+                    self.window_listbox.insert(item_id, "end", text=tab_title,
+                                         values=("tab", tab_url),
+                                         image=self.get_icon_for_type("tab"))
+                
+                # 如果有更多标签页，添加"更多..."条目
+                if len(urls) > max_tabs_to_show:
+                    remaining = len(urls) - max_tabs_to_show
+                    self.window_listbox.insert(item_id, "end", text=f"还有 {remaining} 个标签页...",
+                                         values=("more_tabs", ""),
+                                         image=self.get_icon_for_type("more"))
+
+    def get_icon_for_type(self, item_type):
+        """根据项目类型获取图标"""
+        if item_type == "browser":
+            return self.browser_icon
+        elif item_type == "application":
+            return self.app_icon
+        elif item_type == "tab":
+            return self.tab_icon
+        elif item_type == "more":
+            return self.more_icon
+        else:
+            return self.default_icon
+
+    def setup_icons(self):
+        """设置图标"""
+        # 默认图标
+        self.default_icon = self.create_colored_square((16, 16), "#cccccc")
+        
+        # 应用图标
+        self.app_icon = self.create_colored_square((16, 16), "#4285F4")
+        
+        # 浏览器图标
+        self.browser_icon = self.create_colored_square((16, 16), "#34A853")
+        
+        # 标签页图标
+        self.tab_icon = self.create_colored_square((16, 16), "#FBBC05", radius=8)
+        
+        # 更多图标
+        self.more_icon = self.create_colored_square((16, 16), "#EA4335", radius=8)
+
+    def create_colored_square(self, size, color, radius=0):
+        """创建彩色方块图标"""
+        img = Image.new('RGBA', size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        if radius > 0:
+            # 绘制圆形
+            draw.ellipse([0, 0, size[0]-1, size[1]-1], fill=color)
+        else:
+            # 绘制方形
+            draw.rectangle([0, 0, size[0]-1, size[1]-1], fill=color)
+            
+        return ImageTk.PhotoImage(img) 

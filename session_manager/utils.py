@@ -101,10 +101,22 @@ def is_window_relevant(window, config):
     else:
         return False
 
-# --- 获取浏览器标签页（占位） ---
+# --- 获取浏览器标签页 ---
 def get_browser_tabs(browser_process_path, window_title, config):
     """
-    占位函数，获取浏览器标签页。实际实现需浏览器扩展或特殊接口。
+    获取浏览器标签页。
+    
+    参数:
+        browser_process_path: 浏览器进程路径
+        window_title: 窗口标题
+        config: 配置信息
+        
+    返回:
+        标签页URL列表
     """
-    logger.info(f"  - Note: Collecting tab URLs for '{window_title}' ({os.path.basename(browser_process_path)}) is not yet implemented.")
-    return [] 
+    try:
+        from session_manager.browser_tabs import get_browser_tabs as get_tabs_impl
+        return get_tabs_impl(browser_process_path, window_title, config)
+    except Exception as e:
+        logger.error(f"获取浏览器标签页时出错: {e}", exc_info=True)
+        return [] 
