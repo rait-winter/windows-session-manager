@@ -49,7 +49,7 @@ def setup_logging(config):
     
     # 配置根日志记录器
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG)
     
     # 清除现有处理器并添加新处理器
     for handler in root_logger.handlers[:]:
@@ -211,8 +211,8 @@ def main():
     # 处理命令行操作
     if args.save:
         # 保存会话
-        from session_manager.core import collect_session_data_core
-        session_data = collect_session_data_core(config)
+        from session_manager.core import collect_session_data
+        session_data = collect_session_data(config)
         session_manager.set_session(args.save, session_data)
         session_manager.save_sessions()
         print(f"已保存会话: {args.save}")
@@ -223,8 +223,8 @@ def main():
         session_name = args.restore
         session_data = session_manager.get_session(session_name)
         if session_data:
-            from session_manager.core import restore_specific_session_core
-            restore_specific_session_core(session_data, config)
+            from session_manager.core import restore_session
+            restore_session(session_data, config)
             update_config({"startup": {"last_session": session_name}})
             print(f"已恢复会话: {session_name}")
         else:
@@ -237,8 +237,8 @@ def main():
         if session_name:
             session_data = session_manager.get_session(session_name)
             if session_data:
-                from session_manager.core import restore_specific_session_core
-                restore_specific_session_core(session_data, config)
+                from session_manager.core import restore_session
+                restore_session(session_data, config)
                 print(f"已恢复上次会话: {session_name}")
             else:
                 print(f"找不到上次会话: {session_name}")
@@ -257,12 +257,12 @@ def main():
     
     # 创建应用实例
     app = SessionManagerApp(root, config, session_manager)
-    
+
     # 添加 GUI 日志 handler
     gui_handler = GuiLogHandler(app)
     gui_handler.setLevel(logging.INFO)
     logging.getLogger().addHandler(gui_handler)
-    
+
     # 如果配置了自动恢复上次会话
     if config["startup"]["restore_last_session"] and config["startup"]["last_session"]:
         session_name = config["startup"]["last_session"]

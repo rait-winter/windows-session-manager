@@ -16,6 +16,9 @@ import shutil
 import tempfile
 from pathlib import Path
 import psutil
+import pygetwindow as gw
+import win32process
+import win32gui
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +80,7 @@ BROWSER_PROFILES = {
 
 def get_browser_tabs(browser_process_path, window_title, config):
     """
-    获取浏览器标签页信息
+    获取特定浏览器窗口的标签页信息
     
     参数:
         browser_process_path: 浏览器进程路径
@@ -89,38 +92,93 @@ def get_browser_tabs(browser_process_path, window_title, config):
     """
     browser_exe = os.path.basename(browser_process_path).lower()
     
+    logger.info(f"开始获取浏览器标签页: {browser_exe}, 窗口标题: {window_title}")
+    
     if browser_exe not in BROWSER_PROFILES:
         logger.warning(f"不支持的浏览器: {browser_exe}")
         return []
     
-    # 获取浏览器PID
-    browser_pid = get_browser_pid(browser_process_path, window_title)
+    # 获取浏览器窗口特定PID和窗口句柄
+    browser_pid, window_hwnd = get_browser_pid(browser_process_path, window_title)
     if not browser_pid:
         logger.warning(f"无法获取浏览器PID: {window_title}")
         return []
     
+    logger.info(f"成功获取浏览器PID: {browser_pid}, 窗口句柄: {window_hwnd}")
+    
     # 根据浏览器类型选择不同的标签页获取方法
     if browser_exe in ["chrome.exe", "msedge.exe", "brave.exe"]:
-        return get_chromium_tabs(browser_exe, browser_pid)
+        # 获取特定窗口的标签页
+        tabs = get_chromium_tabs_for_window(browser_exe, browser_pid, window_title, window_hwnd)
+        logger.info(f"获取到 {len(tabs)} 个Chrome标签页")
+        return tabs
     elif browser_exe == "firefox.exe":
-        return get_firefox_tabs(browser_pid)
+        tabs = get_firefox_tabs_for_window(browser_pid, window_title)
+        logger.info(f"获取到 {len(tabs)} 个Firefox标签页")
+        return tabs
     elif browser_exe == "opera.exe":
-        return get_opera_tabs(browser_pid)
+        tabs = get_opera_tabs_for_window(browser_pid, window_title)
+        logger.info(f"获取到 {len(tabs)} 个Opera标签页")
+        return tabs
     
     return []
 
 def get_browser_pid(browser_process_path, window_title):
-    """获取浏览器进程ID"""
+    """获取浏览器进程ID和窗口句柄"""
     browser_exe = os.path.basename(browser_process_path).lower()
     
     try:
+        # 存储所有匹配的浏览器窗口
+        matching_windows = []
+        
+        # 首先尝试精确匹配窗口标题和进程
+        for window in gw.getWindowsWithTitle(window_title):
+            try:
+                _, window_pid = win32process.GetWindowThreadProcessId(window._hWnd)
+                proc = psutil.Process(window_pid)
+                if os.path.basename(proc.exe()).lower() == browser_exe:
+                    logger.debug(f"精确匹配到浏览器窗口: {window.title} (PID: {window_pid}, HWND: {window._hWnd})")
+                    # 返回窗口PID和窗口句柄
+                    return window_pid, window._hWnd
+            except:
+                pass
+        
+        # 如果没有精确匹配，尝试模糊匹配
+        for window in gw.getAllWindows():
+            if not window.title:
+                continue
+                
+            try:
+                _, window_pid = win32process.GetWindowThreadProcessId(window._hWnd)
+                proc = psutil.Process(window_pid)
+                if os.path.basename(proc.exe()).lower() == browser_exe:
+                    # 计算窗口标题与目标标题的相似度
+                    similarity = calculate_similarity(window.title, window_title)
+                    if similarity > 0.6:  # 60%以上的相似度
+                        logger.debug(f"模糊匹配到浏览器窗口: {window.title} (PID: {window_pid}, 相似度: {similarity:.2f}, HWND: {window._hWnd})")
+                        # 返回窗口PID和窗口句柄
+                        return window_pid, window._hWnd
+                    else:
+                        # 记录所有浏览器窗口，以备后用
+                        matching_windows.append((window_pid, window._hWnd, window.title))
+            except:
+                pass
+        
+        # 如果仍未找到匹配，使用第一个浏览器窗口
+        if matching_windows:
+            pid, hwnd, title = matching_windows[0]
+            logger.debug(f"未找到精确匹配，使用第一个浏览器窗口: {title} (PID: {pid}, HWND: {hwnd})")
+            return pid, hwnd
+            
+        # 如果没有找到任何窗口，尝试查找浏览器进程
         for proc in psutil.process_iter(['pid', 'name', 'exe']):
             if proc.info['exe'] and os.path.basename(proc.info['exe']).lower() == browser_exe:
-                return proc.info['pid']
+                logger.debug(f"未找到匹配窗口，使用浏览器进程: {proc.info['pid']}")
+                return proc.info['pid'], None
     except Exception as e:
         logger.error(f"获取浏览器PID时出错: {e}")
     
-    return None
+    return None, None
 
 def get_chromium_tabs(browser_exe, browser_pid):
     """获取基于Chromium的浏览器（Chrome、Edge、Brave）的标签页"""
@@ -131,50 +189,341 @@ def get_chromium_tabs(browser_exe, browser_pid):
     tabs = []
     
     try:
-        # 尝试从数据库获取最近的标签页
-        profile_path = os.path.join(browser_info["data_path"], browser_info["default_profile"])
+        # 获取所有用户配置文件目录
+        user_data_dir = browser_info["data_path"]
+        profiles = get_chromium_profiles(user_data_dir)
         
-        # 如果浏览器正在运行，需要创建数据库的副本
-        history_db = os.path.join(profile_path, browser_info["history_db"])
-        
-        if os.path.exists(history_db):
-            # 创建临时副本
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as temp_file:
-                temp_db_path = temp_file.name
-            
-            try:
-                shutil.copy2(history_db, temp_db_path)
-                
-                # 连接到数据库副本
-                conn = sqlite3.connect(temp_db_path)
-                cursor = conn.cursor()
-                
-                # 获取最近访问的URL（最多30个）
-                cursor.execute("""
-                    SELECT url, title, last_visit_time 
-                    FROM urls 
-                    ORDER BY last_visit_time DESC 
-                    LIMIT 30
-                """)
-                
-                for url, title, _ in cursor.fetchall():
-                    tabs.append({
-                        "url": url,
-                        "title": title or "无标题"
-                    })
-                
-                conn.close()
-            except Exception as e:
-                logger.error(f"读取{browser_info['name']}历史记录时出错: {e}")
-            finally:
-                # 删除临时文件
-                try:
-                    os.unlink(temp_db_path)
-                except:
-                    pass
+        for profile_name in profiles:
+            profile_tabs = get_tabs_from_profile(browser_info, user_data_dir, profile_name)
+            if profile_tabs:
+                tabs.extend(profile_tabs)
+                logger.debug(f"从配置文件 {profile_name} 获取到 {len(profile_tabs)} 个标签页")
     
     except Exception as e:
         logger.error(f"获取{browser_info['name']}标签页时出错: {e}")
+    
+    # 去重并限制返回的标签页数量
+    unique_tabs = []
+    seen_urls = set()
+    
+    for tab in tabs:
+        url = tab.get("url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            unique_tabs.append(tab)
+    
+    return unique_tabs[:50]  # 最多返回50个标签页
+
+def get_chromium_profiles(user_data_dir):
+    """获取Chrome/Edge/Brave的所有用户配置文件"""
+    profiles = ["Default"]  # 始终包含默认配置文件
+    
+    try:
+        # 读取Local State文件以获取所有配置文件
+        local_state_path = os.path.join(user_data_dir, "Local State")
+        if os.path.exists(local_state_path):
+            with open(local_state_path, 'r', encoding='utf-8') as f:
+                try:
+                    local_state = json.load(f)
+                    profile_info = local_state.get("profile", {}).get("info_cache", {})
+                    if profile_info:
+                        for profile_name in profile_info.keys():
+                            if profile_name != "Default" and os.path.exists(os.path.join(user_data_dir, profile_name)):
+                                profiles.append(profile_name)
+                except json.JSONDecodeError:
+                    logger.warning("无法解析Local State文件")
+        
+        # 直接查找目录
+        if not profiles or len(profiles) <= 1:
+            for item in os.listdir(user_data_dir):
+                item_path = os.path.join(user_data_dir, item)
+                if os.path.isdir(item_path) and item.startswith("Profile "):
+                    if item not in profiles:
+                        profiles.append(item)
+    except Exception as e:
+        logger.error(f"获取Chrome配置文件时出错: {e}")
+    
+    return profiles
+
+def get_tabs_from_profile(browser_info, user_data_dir, profile_name):
+    """从特定配置文件获取标签页"""
+    tabs = []
+    profile_path = os.path.join(user_data_dir, profile_name)
+    
+    # 1. 尝试从Current Session和Current Tabs文件中获取标签页
+    session_tabs = extract_tabs_from_session_files(browser_info, profile_path)
+    if session_tabs:
+        tabs.extend(session_tabs)
+    
+    # 2. 如果从会话文件获取的标签页太少，尝试从历史记录获取
+    if len(tabs) < 5:
+        history_tabs = extract_tabs_from_history(browser_info, profile_path)
+        if history_tabs:
+            # 添加不重复的标签页
+            for tab in history_tabs:
+                if not any(existing_tab.get("url") == tab.get("url") for existing_tab in tabs):
+                    tabs.append(tab)
+    
+    return tabs
+
+def extract_tabs_from_session_files(browser_info, profile_path):
+    """从会话文件中提取标签页"""
+    tabs = []
+    
+    # 尝试读取会话文件
+    files_to_check = [
+        (os.path.join(profile_path, "Current Tabs"), "Current Tabs"),
+        (os.path.join(profile_path, "Current Session"), "Current Session"),
+        (os.path.join(profile_path, "Last Tabs"), "Last Tabs"),
+        (os.path.join(profile_path, "Last Session"), "Last Session"),
+        (os.path.join(profile_path, "Sessions", "Tabs_journal"), "Tabs Journal"),
+        (os.path.join(profile_path, "Sessions", "Session_journal"), "Session Journal"),
+        (os.path.join(profile_path, "Sessions", "last"), "Last Session")
+    ]
+    
+    # 保存每个文件中提取的标签页计数，用于日志
+    file_tab_counts = {}
+    
+    for file_path, file_type in files_to_check:
+        if os.path.exists(file_path):
+            try:
+                # 创建临时副本
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as temp_file:
+                    temp_path = temp_file.name
+                    logger.debug(f"正在处理会话文件: {file_type}，创建临时副本: {temp_path}")
+                
+                # 复制文件可能会失败，如果文件被锁定
+                try:
+                    shutil.copy2(file_path, temp_path)
+                except Exception as e:
+                    logger.debug(f"复制文件 {file_type} 失败: {e}")
+                    try:
+                        os.unlink(temp_path)  # 删除可能创建的空临时文件
+                    except:
+                        pass
+                    continue
+                
+                # 读取二进制文件并尝试提取URL
+                with open(temp_path, 'rb') as f:
+                    data = f.read()
+                    file_size = len(data)
+                    logger.debug(f"读取文件 {file_type} 成功，大小: {file_size} 字节")
+                    
+                    # 检查文件大小，如果太小可能不包含有用信息
+                    if file_size < 100:
+                        logger.debug(f"文件 {file_type} 太小 ({file_size} 字节)，可能不包含有效数据")
+                        continue
+                    
+                    # 尝试提取URL和标题
+                    extracted_tabs = extract_urls_and_titles_from_binary(data)
+                    
+                    # 记录提取结果
+                    if extracted_tabs:
+                        old_count = len(tabs)
+                        
+                        # 只添加新的、不重复的标签页
+                        existing_urls = {tab.get("url") for tab in tabs}
+                        new_tabs = [tab for tab in extracted_tabs if tab.get("url") not in existing_urls]
+                        
+                        if new_tabs:
+                            tabs.extend(new_tabs)
+                            new_count = len(tabs) - old_count
+                            logger.debug(f"从 {file_type} 提取到 {len(extracted_tabs)} 个标签页，其中 {new_count} 个是新的")
+                            file_tab_counts[file_type] = new_count
+                        else:
+                            logger.debug(f"从 {file_type} 提取到 {len(extracted_tabs)} 个标签页，但都是重复的")
+                    else:
+                        logger.debug(f"从 {file_type} 未提取到有效标签页")
+                
+                # 删除临时文件
+                try:
+                    os.unlink(temp_path)
+                    logger.debug(f"删除临时文件: {temp_path}")
+                except Exception as e:
+                    logger.debug(f"删除临时文件失败: {e}")
+            except Exception as e:
+                logger.debug(f"读取 {file_type} 文件时出错: {e}")
+    
+    # 总结日志
+    if file_tab_counts:
+        logger.info(f"从会话文件中成功提取标签页: {sum(file_tab_counts.values())} 个，详情: {file_tab_counts}")
+    else:
+        logger.warning(f"未能从任何会话文件中提取到标签页")
+    
+    # 对标签页进行去重和排序（假设更重要的标签页可能在多个文件中出现）
+    unique_tabs = []
+    seen_urls = set()
+    
+    for tab in tabs:
+        url = tab.get("url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            unique_tabs.append(tab)
+    
+    return unique_tabs
+
+def extract_urls_and_titles_from_binary(data):
+    """从二进制数据中提取URL和标题"""
+    tabs = []
+    seen_urls = set()
+    
+    # 提取URL - 使用更严格的模式匹配有效URL
+    url_pattern = re.compile(b'https?://[^\x00-\x1F\x7F-\xFF\s]{2,}[^\x00-\x1F\x7F-\xFF\s]{2,}')
+    url_matches = url_pattern.findall(data)
+    
+    # 提取可能的标题（ASCII和UTF-16编码的文本）
+    title_pattern = re.compile(b'[\x20-\x7E]{5,100}')  # ASCII文本
+    title_matches = title_pattern.findall(data)
+    
+    # 尝试UTF-16编码的标题
+    utf16_title_pattern = re.compile(b'(?:[\x20-\x7E]\x00){5,50}')  # UTF-16编码的文本
+    utf16_matches = utf16_title_pattern.findall(data)
+    
+    # 解码UTF-16标题
+    decoded_utf16 = []
+    for match in utf16_matches:
+        try:
+            text = match.decode('utf-16-le').strip()
+            if text and len(text) >= 5 and not text.startswith('http'):
+                # 过滤掉常见的非标题文本
+                if not any(skip in text.lower() for skip in ['javascript:', 'var ', 'function(', '{ ', ' }', ');']):
+                    decoded_utf16.append(text)
+        except:
+            pass
+    
+    # 解码URL
+    decoded_urls = []
+    for match in url_matches:
+        try:
+            url = match.decode('utf-8')
+            # 过滤掉不需要的URL
+            if not any(skip in url.lower() for skip in [
+                'favicon.ico', 'chrome-extension://', 'chrome-devtools://', 
+                'data:', 'javascript:', 'blob:', 'about:blank', 'file://'
+            ]):
+                # 确保URL是有效的网址（至少包含域名）
+                domain = extract_domain(url)
+                if domain and '.' in domain and len(domain) > 3:
+                    # 移除URL末尾的非标准字符
+                    url = re.sub(r'[\s"\'\\]+$', '', url)
+                    decoded_urls.append(url)
+        except:
+            pass
+    
+    # 解码ASCII标题
+    decoded_titles = []
+    for match in title_matches:
+        try:
+            text = match.decode('utf-8').strip()
+            if text and len(text) >= 5 and not text.startswith('http'):
+                # 过滤掉常见的非标题文本
+                if not any(skip in text.lower() for skip in [
+                    'javascript:', 'var ', 'function(', '{ ', ' }', ');', '://', '.js', '.css',
+                    'undefined', 'null', 'error', 'exception', '<html>', '<div', '</div>'
+                ]):
+                    decoded_titles.append(text)
+        except:
+            pass
+    
+    # 合并所有可能的标题
+    all_titles = decoded_titles + decoded_utf16
+    
+    # 尝试匹配URL和标题
+    for url in decoded_urls:
+        if url in seen_urls:
+            continue
+            
+        seen_urls.add(url)
+        best_title = None
+        best_score = 0
+        
+        # 尝试找到最匹配的标题
+        for title in all_titles:
+            # 如果标题包含URL的一部分，可能是相关的
+            domain = extract_domain(url)
+            if domain and domain.lower() in title.lower():
+                score = 0.8
+                
+                # 如果标题看起来像一个真实的页面标题（有空格，不是纯技术文本）
+                if ' ' in title and not any(tech in title.lower() for tech in ['function', 'var ', 'const ', 'error:', 'exception:']):
+                    score += 0.1
+            else:
+                # 否则检查标题中是否包含URL中的关键词
+                url_parts = re.split(r'[/\-_\.]', url.lower())
+                url_keywords = [part for part in url_parts if len(part) > 3]
+                
+                matches = 0
+                for keyword in url_keywords:
+                    if keyword in title.lower():
+                        matches += 1
+                
+                if url_keywords:
+                    score = matches / len(url_keywords)
+                else:
+                    score = 0
+            
+            if score > best_score:
+                best_score = score
+                best_title = title
+        
+        # 如果没有找到好的标题匹配，使用URL的域名作为标题
+        if not best_title or best_score < 0.3:
+            domain = extract_domain(url)
+            if domain:
+                # 将域名转换为更友好的格式，例如 "example.com" 变为 "Example"
+                best_title = domain.split('.')[0].capitalize()
+            else:
+                best_title = "无标题页面"
+        
+        tabs.append({
+            "url": url,
+            "title": best_title
+        })
+    
+    return tabs
+
+def extract_tabs_from_history(browser_info, profile_path):
+    """从历史记录数据库中提取标签页"""
+    tabs = []
+    
+    # 如果浏览器正在运行，需要创建数据库的副本
+    history_db = os.path.join(profile_path, browser_info["history_db"])
+    
+    if os.path.exists(history_db):
+        # 创建临时副本
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as temp_file:
+            temp_db_path = temp_file.name
+        
+        try:
+            shutil.copy2(history_db, temp_db_path)
+            
+            # 连接到数据库副本
+            conn = sqlite3.connect(temp_db_path)
+            cursor = conn.cursor()
+            
+            # 获取最近访问的URL（最多30个）
+            cursor.execute("""
+                SELECT url, title, last_visit_time 
+                FROM urls 
+                ORDER BY last_visit_time DESC 
+                LIMIT 30
+            """)
+            
+            for url, title, _ in cursor.fetchall():
+                tabs.append({
+                    "url": url,
+                    "title": title or "无标题"
+                })
+            
+            conn.close()
+        except Exception as e:
+            logger.error(f"读取历史记录时出错: {e}")
+        finally:
+            # 删除临时文件
+            try:
+                os.unlink(temp_db_path)
+            except:
+                pass
     
     return tabs
 
@@ -268,42 +617,61 @@ def find_firefox_profile_dir():
     
     return None
 
-def restore_browser_tabs(browser_exe, urls, config):
+def restore_browser_tabs(browser_process_path, window_title, tabs, config):
     """
     恢复浏览器标签页
     
     参数:
-        browser_exe: 浏览器可执行文件名
-        urls: 要恢复的URL列表
+        browser_process_path: 浏览器进程路径
+        window_title: 窗口标题
+        tabs: 标签页列表
         config: 配置信息
         
     返回:
-        是否成功恢复
+        是否成功
     """
-    if not urls:
-        return True  # 没有标签页需要恢复
+    browser_exe = os.path.basename(browser_process_path).lower()
     
-    browser_info = BROWSER_PROFILES.get(browser_exe.lower())
-    if not browser_info:
+    if browser_exe not in BROWSER_PROFILES:
         logger.warning(f"不支持的浏览器: {browser_exe}")
         return False
-    
-    # 获取浏览器完整路径
-    browser_path = find_browser_path(browser_exe)
-    if not browser_path:
-        logger.error(f"无法找到浏览器路径: {browser_exe}")
+        
+    # 检查是否有标签页需要恢复
+    if not tabs:
+        logger.warning("没有标签页需要恢复")
         return False
-    
+        
+    # 获取标签页URL列表
+    urls = []
+    for tab in tabs:
+        if isinstance(tab, dict) and "url" in tab and tab["url"]:
+            urls.append(tab["url"])
+        elif isinstance(tab, str):
+            urls.append(tab)
+            
+    if not urls:
+        logger.warning("无有效URL可恢复")
+        return False
+        
+    # 根据不同浏览器选择不同的恢复方法
     try:
+        # 确保创建新窗口并恢复所有标签页
+        browser_path = find_browser_path(browser_exe)
+        if not browser_path:
+            logger.error(f"无法找到浏览器路径: {browser_exe}")
+            return False
+            
         # 根据浏览器类型选择不同的恢复方法
-        if browser_exe.lower() in ["chrome.exe", "msedge.exe", "brave.exe", "opera.exe"]:
-            return restore_chromium_tabs(browser_path, urls)
-        elif browser_exe.lower() == "firefox.exe":
-            return restore_firefox_tabs(browser_path, urls)
-    
+        if browser_exe in ["chrome.exe", "msedge.exe", "brave.exe"]:
+            return restore_chromium_window(browser_path, urls)
+        elif browser_exe == "firefox.exe":
+            return restore_firefox_window(browser_path, urls)
+        elif browser_exe == "opera.exe":
+            return restore_opera_window(browser_path, urls)
+            
     except Exception as e:
         logger.error(f"恢复浏览器标签页时出错: {e}")
-    
+        
     return False
 
 def find_browser_path(browser_exe):
@@ -360,108 +728,871 @@ def find_browser_path(browser_exe):
     
     return None
 
-def restore_chromium_tabs(browser_path, urls):
-    """恢复基于Chromium的浏览器（Chrome、Edge、Brave、Opera）的标签页"""
+def restore_chromium_window(browser_path, urls):
+    """
+    在Chrome/Edge/Brave中创建新窗口并恢复标签页
+    """
     try:
-        # 检查浏览器是否已经在运行
-        browser_exe = os.path.basename(browser_path).lower()
-        browser_running = False
+        if not urls:
+            logger.warning("没有需要恢复的URL")
+            return False
         
-        for proc in psutil.process_iter(['name']):
-            if proc.info['name'] and proc.info['name'].lower() == browser_exe:
-                browser_running = True
-                break
+        # 确保URLs列表中不包含重复项
+        unique_urls = []
+        seen_urls = set()
+        for url in urls:
+            if isinstance(url, dict):
+                url = url.get("url", "")
+            if url and url not in seen_urls and url.strip().startswith(('http://', 'https://')):
+                # 验证URL格式
+                try:
+                    # 标准化URL，移除末尾的空格和某些特殊字符
+                    url = url.strip().rstrip('"\' \t\n\r\f\v\\')
+                    seen_urls.add(url)
+                    unique_urls.append(url)
+                except:
+                    logger.debug(f"跳过无效URL: {url[:50]}...")
         
-        # 创建临时HTML文件，用于一次性打开多个标签页
+        if not unique_urls:
+            logger.warning("没有有效的URL可以恢复")
+            return False
+            
+        logger.info(f"准备恢复 {len(unique_urls)} 个唯一的URL到新浏览器窗口")
+        
+        # 尝试两种方法恢复标签页
+        
+        # 方法1: 使用HTML文件方法
+        success = restore_using_html_method(browser_path, unique_urls)
+        if success:
+            return True
+            
+        # 方法2: 如果HTML方法失败，尝试命令行参数方法
+        logger.info("HTML方法失败，尝试使用命令行参数方法")
+        success = restore_using_command_line(browser_path, unique_urls)
+        if success:
+            return True
+            
+        # 方法3: 作为最后的尝试，打开第一个URL，然后通过JavaScript打开剩余的URL
+        logger.info("命令行方法失败，尝试使用JavaScript方法")
+        return restore_using_javascript(browser_path, unique_urls)
+            
+    except Exception as e:
+        logger.error(f"恢复Chromium窗口时出错: {e}")
+        return False
+
+def restore_using_html_method(browser_path, urls):
+    """使用HTML文件方法恢复标签页"""
+    try:
+        # 创建临时HTML文件，用于一次性打开所有标签页到同一个窗口中
         with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w', encoding='utf-8') as f:
             temp_html_path = f.name
+            logger.debug(f"创建临时HTML文件: {temp_html_path}")
             
+            # 创建自动打开多个标签页的HTML
             f.write("""
             <!DOCTYPE html>
             <html>
             <head>
-                <title>恢复标签页</title>
+                <meta charset="UTF-8">
+                <title>恢复浏览器会话</title>
+                <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    margin: 20px;
+                    background-color: #f5f5f5;
+                    text-align: center;
+                }
+                h1 {
+                    color: #333;
+                }
+                .progress {
+                    margin: 20px auto;
+                    width: 300px;
+                    height: 20px;
+                    background-color: #ddd;
+                    border-radius: 10px;
+                    overflow: hidden;
+                }
+                .progress-bar {
+                    height: 100%;
+                    background-color: #4CAF50;
+                    width: 0%;
+                    transition: width 0.3s;
+                }
+                .info {
+                    color: #666;
+                    margin-top: 10px;
+                }
+                .url-list {
+                    margin-top: 20px;
+                    text-align: left;
+                    max-height: 200px;
+                    overflow-y: auto;
+                    padding: 10px;
+                    background-color: #fff;
+                    border-radius: 5px;
+                    border: 1px solid #ddd;
+                    font-size: 12px;
+                    display: none;
+                }
+                .show-urls {
+                    margin-top: 10px;
+                    background-color: #f0f0f0;
+                    border: 1px solid #ddd;
+                    padding: 5px 10px;
+                    cursor: pointer;
+                    border-radius: 3px;
+                }
+                .error-message {
+                    color: #d9534f;
+                    margin-top: 10px;
+                    display: none;
+                }
+                </style>
                 <script>
-                function openTabs() {
-                    var urls = [
+                // 所有要恢复的URL
+                var urls = [
             """)
             
             # 写入URL列表
-            for tab in urls:
-                url = tab.get("url", "").replace("'", "\\'")
-                f.write(f"        '{url}',\n")
+            for url in urls:
+                # 处理URL中的单引号和双引号
+                safe_url = url.replace("'", "\\'").replace('"', '\\"')
+                f.write(f'        "{safe_url}",\n')
             
             f.write("""
-                    ];
+                ];
+                
+                var currentIndex = 0;
+                var totalUrls = urls.length;
+                var pauseRestore = false;
+                var restoreInterval = null;
+                var errorCount = 0;
+                var maxErrors = 3;
+                
+                function updateProgress() {
+                    var percent = Math.round((currentIndex / totalUrls) * 100);
+                    document.getElementById('progress-bar').style.width = percent + '%';
+                    document.getElementById('status').textContent = '正在打开标签页 ' + currentIndex + ' / ' + totalUrls;
+                }
+                
+                function openNextTab() {
+                    if (pauseRestore) {
+                        return;
+                    }
                     
-                    for (var i = 0; i < urls.length; i++) {
-                        window.open(urls[i], '_blank');
+                    if (currentIndex < urls.length) {
+                        var url = urls[currentIndex];
+                        
+                        try {
+                            if (currentIndex === 0) {
+                                // 第一个URL在当前页面打开
+                                window.location.href = url;
+                            } else {
+                                // 其余URL在新标签页打开
+                                var newTab = window.open(url, '_blank');
+                                
+                                // 检查是否成功打开（可能会被弹窗拦截器阻止）
+                                if (!newTab || newTab.closed || typeof newTab.closed=='undefined') {
+                                    errorCount++;
+                                    console.error("打开标签页可能被拦截:", url);
+                                    document.getElementById('error-message').style.display = 'block';
+                                    
+                                    // 如果错误过多，切换到手动模式
+                                    if (errorCount >= maxErrors) {
+                                        pauseRestore = true;
+                                        clearInterval(restoreInterval);
+                                        document.getElementById('manual-mode').style.display = 'block';
+                                        document.getElementById('pause-btn').style.display = 'none';
+                                        return;
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.error("打开标签页失败:", e);
+                            errorCount++;
+                        }
+                        
+                        currentIndex++;
+                        updateProgress();
+                        
+                        // 如果已经处理完所有URL，清除定时器
+                        if (currentIndex >= urls.length) {
+                            clearInterval(restoreInterval);
+                            document.getElementById('status').textContent = '已完成所有标签页恢复';
+                        }
                     }
                 }
+                
+                function toggleUrlList() {
+                    var urlList = document.getElementById('url-list');
+                    if (urlList.style.display === 'none' || !urlList.style.display) {
+                        urlList.style.display = 'block';
+                        document.getElementById('toggle-btn').textContent = '隐藏URL列表';
+                    } else {
+                        urlList.style.display = 'none';
+                        document.getElementById('toggle-btn').textContent = '显示URL列表';
+                    }
+                }
+                
+                function togglePause() {
+                    pauseRestore = !pauseRestore;
+                    document.getElementById('pause-btn').textContent = pauseRestore ? '继续恢复' : '暂停恢复';
+                    
+                    if (!pauseRestore && currentIndex < urls.length) {
+                        // 如果恢复过程被暂停过，重新启动恢复
+                        restoreInterval = setInterval(openNextTab, 400);
+                    }
+                }
+                
+                function manualRestore() {
+                    // 手动恢复模式
+                    var manualDiv = document.getElementById('manual-urls');
+                    var manualHtml = '';
+                    
+                    for (var i = currentIndex; i < urls.length; i++) {
+                        manualHtml += '<div class="manual-url">' +
+                            (i+1) + '. <a href="' + urls[i] + '" target="_blank">' + 
+                            (urls[i].length > 50 ? urls[i].substring(0, 50) + '...' : urls[i]) + 
+                            '</a></div>';
+                    }
+                    
+                    manualDiv.innerHTML = manualHtml;
+                }
+                
+                window.onload = function() {
+                    // 显示URL列表
+                    var urlListHtml = '';
+                    for (var i = 0; i < urls.length; i++) {
+                        urlListHtml += (i+1) + '. ' + urls[i] + '<br>';
+                    }
+                    document.getElementById('url-list').innerHTML = urlListHtml;
+                    
+                    // 延迟启动，确保页面已完全加载
+                    setTimeout(function() {
+                        // 开始恢复过程
+                        restoreInterval = setInterval(openNextTab, 400);
+                    }, 500);
+                };
                 </script>
             </head>
-            <body onload="openTabs()">
-                <h1>正在恢复标签页，请稍候...</h1>
+            <body>
+                <h1>正在恢复浏览器会话</h1>
+                <div class="progress">
+                    <div id="progress-bar" class="progress-bar"></div>
+                </div>
+                <p id="status">准备恢复 <strong>""" + str(len(urls)) + """</strong> 个标签页</p>
+                <p class="info">请不要关闭此页面，恢复过程将自动进行</p>
+                <button id="pause-btn" onclick="togglePause()">暂停恢复</button>
+                <button id="toggle-btn" class="show-urls" onclick="toggleUrlList()">显示URL列表</button>
+                <div id="url-list" class="url-list"></div>
+                <div id="error-message" class="error-message">警告: 可能有标签页被弹窗拦截器阻止，请检查浏览器通知。</div>
+                
+                <div id="manual-mode" style="display:none; margin-top:20px; padding:10px; background:#f9f9f9; border:1px solid #ddd;">
+                    <h3>自动恢复被阻止</h3>
+                    <p>您的浏览器可能阻止了自动打开多个标签页。请手动点击下方链接来打开剩余标签页：</p>
+                    <div id="manual-urls" style="text-align:left; margin-top:10px;"></div>
+                    <button onclick="manualRestore()" style="margin-top:10px;">显示剩余链接</button>
+                </div>
             </body>
             </html>
             """)
         
-        # 启动浏览器并打开临时HTML文件
-        cmd = [browser_path]
+        # 创建新窗口并打开临时HTML文件
+        logger.info(f"使用HTML方法启动浏览器恢复 {len(urls)} 个标签页")
+        subprocess.Popen([browser_path, "--new-window", temp_html_path])
         
-        if browser_running:
-            cmd.append(temp_html_path)
-        else:
-            # 如果浏览器未运行，添加一些启动参数
-            browser_info = BROWSER_PROFILES.get(browser_exe)
-            if browser_info and browser_info.get("command_line_args"):
-                cmd.append(browser_info["command_line_args"])
-            cmd.append(temp_html_path)
-        
-        subprocess.Popen(cmd)
-        
-        # 等待一段时间后删除临时文件
+        # 延迟删除临时文件
         def delete_temp_file():
-            time.sleep(30)  # 等待30秒，确保浏览器有足够时间加载
+            time.sleep(90)  # 等待90秒，确保浏览器有足够时间加载
             try:
-                os.unlink(temp_html_path)
-            except:
-                pass
+                if os.path.exists(temp_html_path):
+                    os.unlink(temp_html_path)
+                    logger.debug(f"临时HTML文件已删除: {temp_html_path}")
+            except Exception as e:
+                logger.debug(f"删除临时文件失败: {e}")
         
+        # 在后台线程中删除临时文件
         import threading
         threading.Thread(target=delete_temp_file, daemon=True).start()
         
         return True
-    
     except Exception as e:
-        logger.error(f"恢复Chromium标签页时出错: {e}")
+        logger.error(f"HTML方法恢复标签页失败: {e}")
         return False
 
-def restore_firefox_tabs(browser_path, urls):
-    """恢复Firefox的标签页"""
+def restore_using_command_line(browser_path, urls):
+    """使用命令行参数方法恢复标签页"""
     try:
-        # 检查Firefox是否已经在运行
-        firefox_running = False
+        if not urls:
+            return False
+            
+        # 构建命令行参数
+        cmd = [browser_path, "--new-window"]
         
-        for proc in psutil.process_iter(['name']):
-            if proc.info['name'] and proc.info['name'].lower() == "firefox.exe":
-                firefox_running = True
-                break
+        # 添加第一个URL（将在新窗口中打开）
+        cmd.append(urls[0])
         
-        # Firefox可以通过命令行参数一次性打开多个URL
-        cmd = [browser_path]
-        
-        if not firefox_running:
-            cmd.append("-new-window")
-        
-        # 添加URL列表
-        for tab in urls:
-            url = tab.get("url", "")
+        # 如果有更多URL，添加为新标签页
+        for url in urls[1:10]:  # 限制为前10个，避免命令行过长
             cmd.append(url)
         
-        subprocess.Popen(cmd)
+        # 启动浏览器
+        logger.info(f"使用命令行方法启动浏览器恢复标签页")
+        process = subprocess.Popen(cmd)
+        
+        # 如果有超过10个URL，分批次添加剩余的URL
+        if len(urls) > 10:
+            # 等待第一批次启动
+            time.sleep(3)
+            
+            # 添加剩余URL
+            remaining_urls = urls[10:]
+            logger.info(f"添加剩余的 {len(remaining_urls)} 个URL")
+            
+            # 每10个URL一批次
+            for i in range(0, len(remaining_urls), 10):
+                batch = remaining_urls[i:i+10]
+                cmd = [browser_path]
+                cmd.extend(batch)
+                subprocess.Popen(cmd)
+                time.sleep(1)  # 短暂延迟，避免浏览器过载
+        
         return True
-    
     except Exception as e:
-        logger.error(f"恢复Firefox标签页时出错: {e}")
-        return False 
+        logger.error(f"命令行方法恢复标签页失败: {e}")
+        return False
+
+def restore_using_javascript(browser_path, urls):
+    """使用JavaScript方法恢复标签页"""
+    try:
+        if not urls:
+            return False
+            
+        # 创建一个简单的HTML文件，使用JavaScript在页面加载后打开所有标签页
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w', encoding='utf-8') as f:
+            temp_html_path = f.name
+            
+            # 创建HTML内容
+            f.write("""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>正在恢复标签页</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; text-align: center; }
+                    h2 { margin-top: 20px; }
+                    .url-list { text-align: left; margin: 20px auto; max-width: 800px; }
+                    .url-item { margin: 5px 0; }
+                    button { padding: 8px 15px; margin: 5px; cursor: pointer; }
+                </style>
+            </head>
+            <body>
+                <h1>标签页恢复</h1>
+                <p>由于浏览器限制，无法自动打开所有标签页。请使用下面的按钮手动恢复。</p>
+                
+                <button onclick="openFirst10Tabs()">打开前10个标签页</button>
+                <button onclick="openAllTabsManually()">逐个打开所有标签页</button>
+                
+                <h2>所有待恢复的URL：</h2>
+                <div class="url-list" id="urlList"></div>
+                
+                <script>
+                    // 所有URL
+                    const urls = [
+            """)
+            
+            # 写入URL列表
+            for url in urls:
+                safe_url = url.replace("'", "\\'").replace('"', '\\"')
+                f.write(f'        "{safe_url}",\n')
+            
+            f.write("""
+                    ];
+                    
+                    // 在页面加载时显示URL列表
+                    window.onload = function() {
+                        const urlListElement = document.getElementById('urlList');
+                        urls.forEach((url, index) => {
+                            const div = document.createElement('div');
+                            div.className = 'url-item';
+                            div.innerHTML = `${index + 1}. <a href="${url}" target="_blank">${url}</a>`;
+                            urlListElement.appendChild(div);
+                        });
+                    };
+                    
+                    // 打开前10个标签页
+                    function openFirst10Tabs() {
+                        const max = Math.min(10, urls.length);
+                        for (let i = 0; i < max; i++) {
+                            if (i === 0) {
+                                window.location.href = urls[i];
+                            } else {
+                                window.open(urls[i], '_blank');
+                            }
+                        }
+                    }
+                    
+                    // 逐个打开所有标签页
+                    function openAllTabsManually() {
+                        alert('请点击URL列表中的链接，逐个打开所有标签页。');
+                    }
+                </script>
+            </body>
+            </html>
+            """)
+        
+        # 打开浏览器
+        logger.info(f"使用JavaScript方法启动浏览器恢复标签页")
+        subprocess.Popen([browser_path, "--new-window", temp_html_path])
+        
+        # 延迟删除临时文件
+        def delete_temp_file():
+            time.sleep(120)
+            try:
+                if os.path.exists(temp_html_path):
+                    os.unlink(temp_html_path)
+            except:
+                pass
+        
+        # 在后台线程中删除临时文件
+        import threading
+        threading.Thread(target=delete_temp_file, daemon=True).start()
+        
+        return True
+    except Exception as e:
+        logger.error(f"JavaScript方法恢复标签页失败: {e}")
+        return False
+
+def restore_firefox_window(browser_path, urls):
+    """
+    在Firefox中创建新窗口并恢复标签页
+    """
+    try:
+        if not urls:
+            return False
+            
+        # Firefox可以通过命令行参数直接打开多个URL
+        cmd = [browser_path, "-new-window"]
+        
+        # 第一个URL添加到命令行，会在新窗口中打开
+        first_url = urls[0]
+        if isinstance(first_url, dict):
+            first_url = first_url.get("url", "about:blank")
+        cmd.append(first_url)
+        
+        # 启动Firefox创建新窗口
+        firefox_process = subprocess.Popen(cmd)
+        
+        # 等待一段时间，确保窗口创建成功
+        time.sleep(2)
+        
+        # 添加其余URL到新窗口中作为新标签页
+        if len(urls) > 1:
+            cmd = [browser_path]
+            for url in urls[1:]:
+                if isinstance(url, dict):
+                    url = url.get("url", "")
+                cmd.append(url)
+            
+            # 打开其余标签页
+            subprocess.Popen(cmd)
+        
+        logger.info(f"已创建新Firefox窗口并恢复 {len(urls)} 个标签页")
+        return True
+    except Exception as e:
+        logger.error(f"恢复Firefox窗口时出错: {e}")
+        return False
+
+def restore_opera_window(browser_path, urls):
+    """
+    在Opera中创建新窗口并恢复标签页
+    """
+    try:
+        if not urls:
+            return False
+            
+        # Opera基于Chromium，可以使用类似的方法
+        return restore_chromium_window(browser_path, urls)
+    except Exception as e:
+        logger.error(f"恢复Opera窗口时出错: {e}")
+        return False
+
+def get_chromium_tabs_for_window(browser_exe, browser_pid, window_title, window_hwnd=None):
+    """获取特定窗口的Chromium标签页"""
+    # 从常规历史记录获取标签页列表
+    all_tabs = get_chromium_tabs(browser_exe, browser_pid)
+    
+    if not all_tabs:
+        logger.warning(f"未找到任何标签页数据 (浏览器: {browser_exe}, PID: {browser_pid})")
+        return []
+        
+    logger.info(f"共获取到 {len(all_tabs)} 个标签页，开始匹配窗口 '{window_title}'")
+    
+    # 使用窗口句柄获取窗口的Z顺序（前台/后台）
+    window_z_order = 0
+    if window_hwnd:
+        try:
+            # 获取所有同类型浏览器窗口的Z顺序
+            browser_windows = []
+            for window in gw.getAllWindows():
+                try:
+                    if not window.title or window.title == "":
+                        continue
+                        
+                    _, pid = win32process.GetWindowThreadProcessId(window._hWnd)
+                    proc = psutil.Process(pid)
+                    if os.path.basename(proc.exe()).lower() == browser_exe:
+                        browser_windows.append((window._hWnd, window.title))
+                except Exception as e:
+                    logger.debug(f"获取窗口信息时出错: {e}")
+                    continue
+            
+            # 根据Z顺序排序
+            browser_windows.sort(key=lambda w: win32gui.GetWindowRect(w[0])[1])  # 按Y坐标排序，近似Z顺序
+            
+            # 找出当前窗口的Z顺序索引
+            window_indices = [i for i, (hwnd, _) in enumerate(browser_windows) if hwnd == window_hwnd]
+            if window_indices:
+                window_z_order = window_indices[0]
+                logger.debug(f"窗口 '{window_title}' Z顺序: {window_z_order+1}/{len(browser_windows)}")
+            
+            # 记录所有浏览器窗口标题，用于调试
+            logger.debug(f"浏览器窗口列表: {[title for _, title in browser_windows]}")
+        except Exception as e:
+            logger.debug(f"获取窗口Z顺序时出错: {e}")
+    
+    # 处理窗口标题，移除浏览器后缀
+    clean_window_title = window_title
+    for suffix in [" - Google Chrome", " - Microsoft Edge", " - Brave", " - Firefox", " - Opera"]:
+        if clean_window_title.endswith(suffix):
+            clean_window_title = clean_window_title[:-len(suffix)]
+            break
+    
+    # 提取窗口标题中的关键词
+    window_keywords = extract_keywords(clean_window_title)
+    logger.debug(f"窗口关键词: {window_keywords}")
+    
+    # 记录已找到的标签页
+    relevant_tabs = []
+    
+    # 首先尝试找到与窗口标题最匹配的标签页（通常是当前活动标签页）
+    best_match_tab = None
+    best_match_score = 0
+    
+    for tab in all_tabs:
+        tab_title = tab.get("title", "")
+        
+        # 使用多种匹配方法
+        title_score = calculate_similarity(tab_title, clean_window_title)
+        keyword_score = 0
+        
+        # 关键词匹配
+        if window_keywords:
+            matched_keywords = 0
+            for keyword in window_keywords:
+                if keyword.lower() in tab_title.lower():
+                    matched_keywords += 1
+            if matched_keywords and len(window_keywords) > 0:
+                keyword_score = matched_keywords / len(window_keywords)
+        
+        # 组合得分
+        score = max(title_score, keyword_score * 0.9)  # 稍微偏向直接标题匹配
+        
+        if score > best_match_score:
+            best_match_score = score
+            best_match_tab = tab
+    
+    # 如果找到最佳匹配，将其放在结果列表的首位
+    if best_match_tab and best_match_score > 0.5:
+        logger.debug(f"找到最佳匹配标签页: {best_match_tab.get('title', '')[:30]}... (得分: {best_match_score:.2f})")
+        relevant_tabs.append(best_match_tab)
+        
+        # 记录用于匹配其他标签页的信息
+        best_tab_index = all_tabs.index(best_match_tab)
+        best_domain = extract_domain(best_match_tab.get("url", ""))
+        
+        # 为剩余标签页评分
+        tab_scores = []
+        for i, tab in enumerate(all_tabs):
+            if tab == best_match_tab:
+                continue
+                
+            score = 0
+            
+            # 域名相似性得分
+            tab_domain = extract_domain(tab.get("url", ""))
+            if tab_domain == best_domain and best_domain:
+                score += 3  # 相同域名加高分
+            elif tab_domain and best_domain and (tab_domain in best_domain or best_domain in tab_domain):
+                score += 1  # 部分匹配域名加低分
+            
+            # 位置接近度得分（时间接近度的近似）
+            position_diff = abs(i - best_tab_index)
+            if position_diff <= 3:
+                score += 3  # 非常接近
+            elif position_diff <= 7:
+                score += 2  # 较接近
+            elif position_diff <= 15:
+                score += 1  # 一般接近
+            
+            # 标题关键词匹配
+            if window_keywords:
+                tab_title = tab.get("title", "").lower()
+                for keyword in window_keywords:
+                    if keyword.lower() in tab_title:
+                        score += 2  # 每匹配一个关键词加分
+            
+            # Z顺序影响（前台窗口的标签页可能在列表前部，后台窗口的标签页可能在后部）
+            if window_z_order == 0:  # 前台窗口
+                if i < len(all_tabs) // 2:  # 在列表前半部分
+                    score += 1
+            else:  # 后台窗口
+                if i >= len(all_tabs) // 2:  # 在列表后半部分
+                    score += 1
+            
+            # 保存标签页和得分
+            tab_scores.append((tab, score))
+        
+        # 按得分排序
+        tab_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # 添加得分较高的标签页（得分至少为3）
+        added_count = 0
+        for tab, score in tab_scores:
+            if score >= 3 and tab not in relevant_tabs:
+                relevant_tabs.append(tab)
+                added_count += 1
+                logger.debug(f"添加相关标签页: {tab.get('title', '')[:30]}... (得分: {score})")
+                
+                # 限制添加的相关标签页数量，避免将所有标签页都添加到同一窗口
+                if added_count >= 15:  # 最多添加15个相关标签页
+                    break
+    
+    # 如果没有找到足够相关的标签页，使用其他策略
+    if len(relevant_tabs) < 3:
+        logger.debug(f"未找到足够的相关标签页，尝试其他匹配方法")
+        
+        # 尝试基于关键词匹配
+        if window_keywords:
+            keyword_tabs = []
+            for tab in all_tabs:
+                if tab in relevant_tabs:
+                    continue
+                    
+                tab_title = tab.get("title", "").lower()
+                for keyword in window_keywords:
+                    if keyword.lower() in tab_title:
+                        keyword_tabs.append(tab)
+                        logger.debug(f"基于关键词匹配添加标签页: {tab.get('title', '')[:30]}... (关键词: {keyword})")
+                        break
+            
+            # 添加基于关键词匹配的标签页
+            for tab in keyword_tabs[:5]:  # 最多添加5个关键词匹配的标签页
+                if tab not in relevant_tabs:
+                    relevant_tabs.append(tab)
+        
+        # 如果仍然不够，添加最近的几个标签页
+        if len(relevant_tabs) < 3:
+            logger.debug(f"关键词匹配标签页不足，添加最近标签页")
+            recent_tabs_added = 0
+            for tab in all_tabs:
+                if tab not in relevant_tabs:
+                    relevant_tabs.append(tab)
+                    recent_tabs_added += 1
+                    logger.debug(f"添加最近标签页: {tab.get('title', '')[:30]}...")
+                    if recent_tabs_added >= 5:  # 最多添加5个最近的标签页
+                        break
+    
+    logger.info(f"窗口 '{window_title}' 最终匹配到 {len(relevant_tabs)} 个标签页")
+    
+    # 对匹配到的标签页进行去重
+    unique_tabs = []
+    seen_urls = set()
+    
+    for tab in relevant_tabs:
+        url = tab.get("url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            unique_tabs.append(tab)
+    
+    return unique_tabs[:20]  # 最多返回20个标签页
+
+def extract_keywords(text):
+    """从文本中提取关键词"""
+    if not text:
+        return []
+        
+    # 移除常见浏览器后缀
+    text = text.replace(" - Google Chrome", "")
+    text = text.replace(" - Microsoft Edge", "")
+    text = text.replace(" - Brave", "")
+    text = text.replace(" - Firefox", "")
+    text = text.replace(" - Opera", "")
+    
+    # 英文停用词
+    english_stopwords = [
+        "the", "of", "and", "to", "a", "in", "for", "is", "on", "that", "by", 
+        "this", "with", "you", "it", "not", "or", "be", "are", "from", "at", 
+        "as", "your", "all", "have", "new", "more", "an", "was", "we", "will", 
+        "home", "can", "us", "about", "if", "page", "my", "has", "search", 
+        "free", "but", "our", "one", "other", "do", "no", "information", "time",
+        "they", "site", "he", "up", "may", "what", "which", "their", "news",
+        "out", "use", "any", "there", "see", "only", "so", "his", "when",
+        "contact", "here", "business", "who", "web", "also", "now", "help",
+        "get", "view", "online", "first", "am", "been", "would", "how", "were",
+        "me", "some", "these", "its", "like", "than", "find", "date", "back",
+        "top", "had", "list", "name", "just", "over", "year", "day", "into",
+        "email", "two", "health", "world", "next", "used", "go", "work", "last",
+        "most", "products", "music", "buy", "data", "make", "them", "should",
+        "product", "system", "post", "her", "city", "add", "policy", "number",
+        "such", "please", "available", "copyright", "support", "message", "after",
+        "best", "software", "then", "jan", "good", "video", "well", "where",
+        "info", "rights", "public", "books", "high", "school", "through",
+        "each", "links", "she", "review", "years", "order", "very", "privacy",
+        "book", "items", "company", "read", "group", "sex", "need", "many", 
+        "user", "said", "de", "does", "set", "under", "general", "research",
+        "university", "mail", "full", "map", "reviews"
+    ]
+    
+    # 中文停用词
+    chinese_stopwords = [
+        "的", "了", "和", "是", "就", "都", "而", "及", "与", "着", "或", "一个", "没有",
+        "我们", "你们", "他们", "她们", "它们", "也", "还", "但", "但是", "然而", "可是",
+        "只是", "不过", "至于", "况且", "并", "并且", "而且", "不仅", "不但", "而是",
+        "乃至", "之", "的话", "说", "等", "等等", "呢", "吧", "吗", "啊", "嗯", "那么",
+        "这么", "这个", "那个", "这", "那", "如此", "这样", "那样", "怎样", "如何",
+        "什么", "哪些", "谁", "哪个", "多少", "几", "何", "怎么", "怎么样", "一些",
+        "有些", "有的", "所有", "每个", "各个", "各种", "和", "跟", "同", "以及",
+        "与", "以", "及", "既", "又", "既然", "因为", "由于", "所以", "因此", "故",
+        "以致", "致使", "却", "虽", "虽然", "尽管", "不过", "可是", "然而", "假如",
+        "如果", "即使", "假使", "要是", "除非", "只有", "除了", "而", "并", "且", "乃至",
+        "之", "的话", "一", "一个", "一些", "一何", "一切", "一则", "一方面", "一旦",
+        "一来", "一样", "一般", "一转眼", "万一"
+    ]
+    
+    # 创建综合停用词集合，包含中英文
+    stopwords = set(english_stopwords + chinese_stopwords)
+    
+    # 判断文本是否包含中文
+    contains_chinese = any('\u4e00' <= ch <= '\u9fff' for ch in text)
+    
+    if contains_chinese:
+        # 中文文本处理
+        # 尝试使用结巴分词（如果安装了）
+        try:
+            import jieba
+            # 分词
+            words = jieba.cut(text)
+            # 过滤停用词和短词
+            keywords = [word for word in words 
+                        if word not in stopwords 
+                        and len(word) >= 2 
+                        and not word.isdigit()]
+        except ImportError:
+            # 如果没有结巴分词，使用简单的字符分割
+            # 先按空格分割
+            words = text.split()
+            
+            # 如果分割后还是很少的词（说明可能是没有空格的中文），尝试按字符提取
+            if len(words) <= 2:
+                # 提取2个及以上连续的中文字符作为关键词
+                import re
+                chinese_words = re.findall(r'[\u4e00-\u9fff]{2,}', text)
+                words.extend(chinese_words)
+            
+            # 过滤停用词和短词
+            keywords = [word for word in words 
+                        if word not in stopwords 
+                        and len(word) >= 2 
+                        and not word.isdigit()]
+    else:
+        # 英文文本处理
+        # 分词并移除停用词和短词
+        words = text.split()
+        keywords = [word for word in words 
+                    if word.lower() not in stopwords 
+                    and len(word) > 2 
+                    and not word.isdigit()
+                    and not all(c.isdigit() or c in '.-:' for c in word)]  # 排除日期、时间等数字形式
+    
+    # 去除标点符号和特殊字符
+    import re
+    clean_keywords = []
+    for word in keywords:
+        # 清理词首尾的标点符号
+        word = re.sub(r'^[^\w\s]|[^\w\s]$', '', word)
+        # 如果清理后的词长度仍然够长，添加到结果中
+        if len(word) >= 2:
+            clean_keywords.append(word)
+    
+    # 去重并保留顺序
+    seen = set()
+    unique_keywords = []
+    for word in clean_keywords:
+        lowercase_word = word.lower()
+        if lowercase_word not in seen:
+            seen.add(lowercase_word)
+            unique_keywords.append(word)
+    
+    # 限制关键词数量，优先保留较长的词
+    if len(unique_keywords) > 10:
+        unique_keywords.sort(key=len, reverse=True)
+        unique_keywords = unique_keywords[:10]
+    
+    return unique_keywords
+
+def calculate_similarity(text1, text2):
+    """计算两个文本的相似度，返回0-1之间的值"""
+    import difflib
+    return difflib.SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+
+def extract_domain(url):
+    """从URL中提取域名"""
+    try:
+        if not url:
+            return ""
+            
+        # 移除协议部分
+        if "://" in url:
+            url = url.split("://", 1)[1]
+            
+        # 获取域名部分
+        domain = url.split("/", 1)[0]
+        
+        # 移除www.前缀
+        if domain.startswith("www."):
+            domain = domain[4:]
+            
+        return domain
+    except:
+        return ""
+
+def get_firefox_tabs_for_window(browser_pid, window_title):
+    """获取特定Firefox窗口的标签页"""
+    all_tabs = get_firefox_tabs(browser_pid)
+    window_keywords = extract_keywords(window_title)
+    
+    if window_keywords:
+        relevant_tabs = [tab for tab in all_tabs 
+                         if any(keyword.lower() in tab.get("title", "").lower() 
+                                for keyword in window_keywords)]
+        if relevant_tabs:
+            return relevant_tabs[:30]
+    
+    return all_tabs[:10]
+
+def get_opera_tabs_for_window(browser_pid, window_title):
+    """获取特定Opera窗口的标签页"""
+    all_tabs = get_opera_tabs(browser_pid)
+    window_keywords = extract_keywords(window_title)
+    
+    if window_keywords:
+        relevant_tabs = [tab for tab in all_tabs 
+                         if any(keyword.lower() in tab.get("title", "").lower() 
+                                for keyword in window_keywords)]
+        if relevant_tabs:
+            return relevant_tabs[:30]
+    
+    return all_tabs[:10] 

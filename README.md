@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://www.python.org/)
 [![Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue.svg)](https://www.microsoft.com/windows)
-[![Version](https://img.shields.io/badge/Version-1.0.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.1.0-green.svg)](CHANGELOG.md)
 
 Windows会话管理器是一个强大的工具，可以帮助您保存和恢复Windows工作环境，包括打开的应用程序和窗口布局。无论您是需要在不同任务之间快速切换，还是想在重启后恢复工作环境，这个工具都能为您提供高效的解决方案。
 
@@ -146,14 +146,21 @@ Windows会话管理器能够识别和恢复特殊应用程序，如：
 
 ### 浏览器会话管理
 
-当前版本支持检测浏览器窗口，包括：
+Windows会话管理器支持完整的浏览器标签页管理功能，包括：
 
-- Google Chrome
-- Microsoft Edge
-- Firefox
-- 其他常见浏览器
+- **保存所有标签页**：保存当前打开的所有浏览器标签页
+- **智能匹配**：根据窗口标题智能匹配标签页到对应浏览器窗口
+- **分组显示**：在UI中清晰地显示每个浏览器窗口的标签页
+- **一键恢复**：恢复会话时自动打开所有保存的标签页
+- **多浏览器支持**：支持以下浏览器
+  - Google Chrome
+  - Microsoft Edge
+  - Mozilla Firefox
+  - Brave Browser
+  - Opera
+  - 其他基于Chromium的浏览器
 
-未来版本将增强对浏览器标签页的管理功能。
+该功能支持同时处理多个浏览器窗口，每个窗口可以有多个标签页。
 
 ### 会话导入/导出
 
@@ -200,7 +207,7 @@ Windows会话管理器能够识别和恢复特殊应用程序，如：
 答：是的，但最佳效果需要相同的显示器配置。如果配置变化，窗口可能需要手动调整。
 
 **问：是否支持保存浏览器标签页？**  
-答：当前版本支持检测浏览器窗口，但不会详细记录标签页内容。未来版本计划增强此功能。
+答：是的，当前版本完全支持保存和恢复浏览器标签页，包括Chrome、Edge、Firefox、Brave和Opera等主流浏览器。系统会自动匹配窗口和标签页，并在恢复会话时打开所有标签页。
 
 **问：如何使用热键快速保存/恢复会话？**  
 答：默认热键为Ctrl+Alt+S（保存）和Ctrl+Alt+R（恢复）。可在配置文件中自定义。

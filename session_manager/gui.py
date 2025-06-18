@@ -27,7 +27,7 @@ import psutil
 import win32con
 
 from . import config
-from .core import collect_session_data_core, restore_specific_session_core
+from .core import collect_session_data, restore_session
 
 # 日志记录器
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ class GuiLogHandler(logging.Handler):
         self.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         self.log_queue = queue.Queue()
         self.start_queue_listener()
-    
+
     def emit(self, record):
         log_entry = self.format(record)
         self.log_queue.put((record.levelno, log_entry))
@@ -113,17 +113,21 @@ class SessionManagerApp:
         self.root = root
         self.config = config
         self.session_manager = session_manager
-        self.current_session_name = None
+        
+        # 设置初始会话
+        self.current_session_items = []
+        session_names = self.session_manager.get_session_names()
+        if session_names:
+            self.current_session_name = session_names[0]
+            self.current_session_items = self.session_manager.get_session(self.current_session_name)
+        else:
+            self.current_session_name = self.session_manager.default_session_name
         
         # 设置主题
         self.setup_theme()
         
         # 设置图标
         self.setup_icons()
-        
-        # 创建主框架
-        self.main_frame = ttk.Frame(root)
-        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # 美化界面
         style = ttk.Style()
@@ -184,15 +188,19 @@ class SessionManagerApp:
         right_frame = ttk.Frame(main_frame)
         right_frame.grid(row=0, column=1, sticky="nsew")
         ttk.Label(right_frame, text="当前会话应用").pack(anchor="w")
-        self.app_tree = ttk.Treeview(right_frame, columns=("类型", "标题", "路径"), show="headings")
-        self.app_tree.heading("类型", text="类型")
-        self.app_tree.heading("标题", text="标题")
-        self.app_tree.heading("路径", text="路径")
-        self.app_tree.column("类型", width=80, anchor=tk.CENTER)
-        self.app_tree.column("标题", width=200)
-        self.app_tree.column("路径", width=350)
-        self.app_tree.pack(fill=tk.BOTH, expand=True)
-        self.refresh_app_tree()
+        
+        # 使用Treeview代替原来的app_tree，重命名为window_listbox
+        self.window_listbox = ttk.Treeview(right_frame, columns=("类型", "路径"), show="tree headings")
+        self.window_listbox.heading("#0", text="标题/名称")
+        self.window_listbox.heading("类型", text="类型")
+        self.window_listbox.heading("路径", text="路径")
+        self.window_listbox.column("#0", width=250, anchor=tk.W)
+        self.window_listbox.column("类型", width=80, anchor=tk.CENTER)
+        self.window_listbox.column("路径", width=350)
+        self.window_listbox.pack(fill=tk.BOTH, expand=True)
+        
+        # 添加双击事件处理
+        self.window_listbox.bind("<Double-1>", self.on_item_double_click)
 
         # 操作按钮区
         btn_frame = ttk.Frame(main_frame)
@@ -222,6 +230,9 @@ class SessionManagerApp:
         # 退出按钮
         exit_btn = ttk.Button(bottom_frame, text="退出", command=self.root.quit)
         exit_btn.pack(side=tk.RIGHT, padx=10, pady=2)
+        
+        # 刷新应用列表
+        self.refresh_window_list()
 
     # 下面实现各操作方法
     def refresh_session_list(self):
@@ -232,38 +243,46 @@ class SessionManagerApp:
         if names:
             self.session_list.selection_set(0)
 
-    def refresh_app_tree(self):
-        self.app_tree.delete(*self.app_tree.get_children())
-        for item in self.current_session_items:
-            if isinstance(item, dict):
-                self.app_tree.insert("", tk.END, values=(item.get("type", ""), item.get("title", ""), item.get("path", "")))
-            else:
-                self.log_to_gui(f"警告：会话数据中存在非法项（类型：{type(item)}，值：{item}），已跳过。")
-
     def on_session_select(self, event):
         idx = self.session_list.curselection()
         if idx:
             name = self.session_list.get(idx[0])
             self.current_session_name = name
             self.current_session_items = self.session_manager.get_session(name)
-            self.refresh_app_tree()
+            self.refresh_window_list()
             self.status_bar.config(text=f"已切换到会话：{name}")
 
     def save_session(self):
-        items = collect_session_data_core(self.config)
-        self.session_manager.set_session(self.current_session_name, items)
-        self.current_session_items = items
-        self.refresh_app_tree()
-        self.status_bar.config(text=f"会话 '{self.current_session_name}' 已保存。")
-        messagebox.showinfo("保存成功", f"会话 '{self.current_session_name}' 已保存。")
+        try:
+            items = collect_session_data(self.config)
+            self.session_manager.set_session(self.current_session_name, items)
+            self.current_session_items = items
+            self.refresh_window_list()
+            self.status_bar.config(text=f"会话 '{self.current_session_name}' 已保存。")
+            messagebox.showinfo("保存成功", f"会话 '{self.current_session_name}' 已保存。")
+        except Exception as e:
+            logger.error(f"保存会话时出错: {e}", exc_info=True)
+            self.log_to_gui(f"保存会话失败: {e}")
+            messagebox.showerror("保存失败", f"保存会话时出错: {e}")
 
     def restore_session(self):
-        if not self.current_session_items:
-            messagebox.showwarning("恢复失败", "当前会话没有可恢复的应用。")
-            return
-        restore_specific_session_core(self.current_session_items, self.config)
-        self.status_bar.config(text=f"会话 '{self.current_session_name}' 恢复完成。")
-        messagebox.showinfo("恢复完成", f"会话 '{self.current_session_name}' 已尝试恢复。")
+        try:
+            if not self.current_session_items:
+                messagebox.showwarning("恢复失败", "当前会话没有可恢复的应用。")
+                return
+                
+            success_count, fail_count = restore_session(self.current_session_items, self.config)
+            
+            if success_count == 0 and fail_count == 0:
+                self.status_bar.config(text=f"会话 '{self.current_session_name}' 没有内容可恢复。")
+                messagebox.showinfo("恢复完成", f"会话 '{self.current_session_name}' 没有内容可恢复。")
+            else:
+                self.status_bar.config(text=f"会话 '{self.current_session_name}' 恢复完成。成功: {success_count}, 失败: {fail_count}")
+                messagebox.showinfo("恢复完成", f"会话 '{self.current_session_name}' 已尝试恢复。\n成功: {success_count}, 失败: {fail_count}")
+        except Exception as e:
+            logger.error(f"恢复会话时出错: {e}", exc_info=True)
+            self.log_to_gui(f"恢复会话失败: {e}")
+            messagebox.showerror("恢复失败", f"恢复会话时出错: {e}")
 
     def import_session(self):
         file_path = filedialog.askopenfilename(
@@ -353,7 +372,7 @@ class SessionManagerApp:
             self.current_session_name = default_name
             self.current_session_items = []
             self.refresh_session_list()
-        self.refresh_app_tree()
+        self.refresh_window_list()
         self.status_bar.config(text=f"会话已删除。")
         messagebox.showinfo("删除成功", "会话已删除。")
 
@@ -365,7 +384,7 @@ class SessionManagerApp:
             return
         self.session_manager.clear_session(self.current_session_name)
         self.current_session_items = []
-        self.refresh_app_tree()
+        self.refresh_window_list()
         self.status_bar.config(text=f"会话 '{self.current_session_name}' 已清空。")
         messagebox.showinfo("清空成功", f"会话 '{self.current_session_name}' 已清空。")
 
@@ -376,6 +395,7 @@ class SessionManagerApp:
         messagebox.showinfo("关于", "Windows 会话管理器\n版本：1.0\n作者：您的名字\nGitHub: https://github.com/rait-winter/windows-session-manager")
 
     def log_to_gui(self, msg):
+        """向GUI日志区输出信息"""
         self.log_text.config(state='normal')
         self.log_text.insert(tk.END, msg + '\n')
         self.log_text.see(tk.END)
@@ -728,8 +748,12 @@ class SessionManagerApp:
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled') 
 
-    def update_window_list(self):
-        """更新窗口列表"""
+    def get_session_data(self, session_name):
+        """获取会话数据"""
+        return self.session_manager.get_session(session_name)
+
+    def refresh_window_list(self):
+        """刷新窗口列表"""
         if not self.current_session_name:
             return
             
@@ -738,52 +762,104 @@ class SessionManagerApp:
             self.window_listbox.delete(i)
             
         # 获取当前会话数据
-        session_data = self.session_manager.get_session_data(self.current_session_name)
+        session_data = self.get_session_data(self.current_session_name)
         if not session_data:
+            self.log_to_gui("会话数据为空")
             return
             
-        # 添加窗口到列表
-        for i, window_info in enumerate(session_data):
-            window_type = window_info.get("type", "unknown")
-            window_title = window_info.get("title", "未知窗口")
-            window_path = window_info.get("path", "")
+        # 兼容旧版会话数据格式
+        if isinstance(session_data, list):
+            # 按类型分组：浏览器和应用程序
+            browsers = []
+            applications = []
             
-            icon = self.get_icon_for_type(window_type)
+            for window_info in session_data:
+                if not isinstance(window_info, dict):
+                    self.log_to_gui(f"警告：会话数据中存在非法项（类型：{type(window_info)}，值：{window_info}），已跳过。")
+                    continue
+                    
+                window_type = window_info.get("type", "unknown")
+                if window_type == "browser":
+                    browsers.append(window_info)
+                else:
+                    applications.append(window_info)
+        else:
+            # 新版会话数据格式：包含applications和browser_windows两个键
+            browsers = session_data.get("browser_windows", [])
+            applications = session_data.get("applications", [])
+                
+        # 添加浏览器窗口到列表
+        for browser_info in browsers:
+            if not isinstance(browser_info, dict):
+                continue
+                
+            # 适配不同的数据结构
+            window_title = browser_info.get("title", "未知浏览器")
+            window_path = browser_info.get("path") or browser_info.get("process_path", "")
             
-            # 检查是否有标签页数据
-            urls = window_info.get("urls", [])
+            # 处理标签页：兼容不同的键名
+            if "tabs" in browser_info:
+                urls = browser_info["tabs"]
+            elif "urls" in browser_info:
+                urls = browser_info["urls"]
+            else:
+                urls = []
+                
             has_tabs = len(urls) > 0
             
-            # 添加主窗口条目
-            item_id = self.window_listbox.insert("", "end", text=window_title, 
-                                           values=(window_type, window_path),
-                                           image=icon)
-                                           
-            # 如果是浏览器且有标签页数据，添加子条目
-            if window_type == "browser" and has_tabs:
-                # 最多显示10个标签页，避免界面过于拥挤
-                max_tabs_to_show = min(10, len(urls))
+            # 添加浏览器主条目
+            browser_icon = self.get_icon_for_type("browser")
+            browser_id = self.window_listbox.insert("", "end", text=window_title, 
+                                       values=("browser", window_path),
+                                       image=browser_icon,
+                                       open=False)  # 默认折叠
+            
+            # 如果有标签页，添加为子条目
+            if has_tabs:
+                # 第一个子条目显示标签页总数
+                tab_count_id = self.window_listbox.insert(browser_id, "end", 
+                                       text=f"包含 {len(urls)} 个标签页", 
+                                       values=("tab_count", ""),
+                                       image=self.get_icon_for_type("info"))
                 
-                for j in range(max_tabs_to_show):
-                    tab = urls[j]
-                    tab_title = tab.get("title", "无标题")
-                    tab_url = tab.get("url", "")
+                # 添加各个标签页
+                for i, tab in enumerate(urls):
+                    # 兼容不同的标签页数据结构
+                    if isinstance(tab, dict):
+                        tab_title = tab.get("title", "无标题")
+                        tab_url = tab.get("url", "")
+                    elif isinstance(tab, str):
+                        tab_title = f"标签页 {i+1}"
+                        tab_url = tab
+                    else:
+                        continue
                     
                     # 截断过长的标题
                     if len(tab_title) > 50:
                         tab_title = tab_title[:47] + "..."
                         
-                    # 添加标签页子条目
-                    self.window_listbox.insert(item_id, "end", text=tab_title,
-                                         values=("tab", tab_url),
-                                         image=self.get_icon_for_type("tab"))
+                    # 添加标签页条目
+                    self.window_listbox.insert(browser_id, "end", 
+                                     text=tab_title,
+                                     values=("tab", tab_url),
+                                     image=self.get_icon_for_type("tab"))
+        
+        # 添加其他应用到列表
+        for app_info in applications:
+            if not isinstance(app_info, dict):
+                continue
                 
-                # 如果有更多标签页，添加"更多..."条目
-                if len(urls) > max_tabs_to_show:
-                    remaining = len(urls) - max_tabs_to_show
-                    self.window_listbox.insert(item_id, "end", text=f"还有 {remaining} 个标签页...",
-                                         values=("more_tabs", ""),
-                                         image=self.get_icon_for_type("more"))
+            # 适配不同的数据结构
+            window_title = app_info.get("title", "未知应用")
+            window_path = app_info.get("path") or app_info.get("process_path", "")
+            window_type = app_info.get("type", "application")
+            
+            # 添加应用条目
+            app_icon = self.get_icon_for_type(window_type)
+            self.window_listbox.insert("", "end", 
+                               text=window_title, 
+                               values=(window_type, window_path),
+                               image=app_icon)
 
     def get_icon_for_type(self, item_type):
         """根据项目类型获取图标"""
@@ -795,6 +871,8 @@ class SessionManagerApp:
             return self.tab_icon
         elif item_type == "more":
             return self.more_icon
+        elif item_type == "info":
+            return self.info_icon
         else:
             return self.default_icon
 
@@ -814,6 +892,9 @@ class SessionManagerApp:
         
         # 更多图标
         self.more_icon = self.create_colored_square((16, 16), "#EA4335", radius=8)
+        
+        # 信息图标
+        self.info_icon = self.create_colored_square((16, 16), "#4FC3F7", radius=4)
 
     def create_colored_square(self, size, color, radius=0):
         """创建彩色方块图标"""
@@ -828,3 +909,37 @@ class SessionManagerApp:
             draw.rectangle([0, 0, size[0]-1, size[1]-1], fill=color)
             
         return ImageTk.PhotoImage(img) 
+
+    def setup_theme(self):
+        """设置应用主题"""
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('TButton', font=('微软雅黑', 10), padding=6)
+        style.configure('TLabel', font=('微软雅黑', 10))
+        style.configure('Treeview.Heading', font=('微软雅黑', 10, 'bold'))
+        
+        self.root.title("会话管理器")
+        self.root.geometry("900x600")
+        self.root.minsize(700, 500) 
+
+    def on_item_double_click(self, event):
+        """处理项目双击事件"""
+        item_id = self.window_listbox.identify_row(event.y)
+        if not item_id:
+            return
+            
+        # 获取项目信息
+        item_values = self.window_listbox.item(item_id, "values")
+        if not item_values:
+            return
+            
+        item_type = item_values[0]
+        item_path = item_values[1]
+        
+        # 如果是标签页，打开URL
+        if item_type == "tab" and item_path:
+            try:
+                self.log_to_gui(f"正在打开URL: {item_path}")
+                webbrowser.open(item_path)
+            except Exception as e:
+                self.log_to_gui(f"打开URL失败: {e}") 

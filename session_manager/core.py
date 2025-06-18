@@ -19,123 +19,112 @@ import win32process
 import win32api
 import psutil
 
-# 需要从主程序导入的工具函数（如 get_process_path_from_hwnd、is_browser_process）
-# 这里假设后续会迁移这些函数到 utils.py 或 core.py 内部
-# from .utils import get_process_path_from_hwnd, is_browser_process
+# 导入浏览器标签页支持模块
+from session_manager.browser_tabs import get_browser_tabs
+
+# 尝试导入浏览器标签页支持模块
+try:
+    from session_manager.browser_tabs import restore_browser_tabs
+    BROWSER_TABS_SUPPORT = True
+except ImportError:
+    BROWSER_TABS_SUPPORT = False
 
 logger = logging.getLogger(__name__)
 
 # --- 会话采集 ---
-def collect_session_data_core(config):
-    from session_manager.utils import is_window_relevant, is_browser_process, get_process_path_from_hwnd, get_browser_tabs
-    session_items = []
-    processed_app_paths = set()
-    processed_browser_paths = set()
+def collect_session_data(config):
+    """收集当前会话数据"""
     logger.info("开始收集当前会话数据...")
+    session_data = {"applications": [], "browser_windows": []}
     
-    # 1. 使用pygetwindow采集常规窗口
-    try:
-        windows = gw.getAllWindows()
-        if not windows:
-            logger.info("未找到任何可见窗口进行收集。")
-        else:
-            for window in windows:
-                process_path = is_window_relevant(window, config)
-                if process_path:
-                    is_browser = is_browser_process(process_path, config)
-                    if is_browser:
-                        if process_path not in processed_browser_paths:
-                            browser_info = {
-                                "type": "browser",
-                                "title": window.title,
-                                "path": process_path,
-                                "urls": get_browser_tabs(process_path, window.title, config),
-                            }
-                            session_items.append(browser_info)
-                            processed_browser_paths.add(process_path)
-                            logger.debug(f"收集到浏览器: '{window.title}' ({process_path})")
-                        continue
-                    else:
-                        if process_path not in processed_app_paths:
-                            window_info = {
-                                "type": "application",
-                                "title": window.title,
-                                "path": process_path,
-                            }
-                            session_items.append(window_info)
-                            processed_app_paths.add(process_path)
-                            logger.debug(f"收集到应用: '{window.title}' ({process_path})")
-                        continue
-    except Exception as e:
-        logger.error(f"使用pygetwindow收集窗口信息时发生错误: {e}", exc_info=True)
+    # 跳过的应用程序列表
+    excluded_apps = config.get("excluded_apps", [])
+    excluded_exes = [os.path.basename(app).lower() for app in excluded_apps]
     
-    # 2. 使用win32gui采集特殊应用窗口
-    try:
-        import win32gui
-        import win32process
-        import win32con
-        import psutil
-        
-        # 特殊应用名称列表
-        special_apps = ['PixPin', 'FastOrange', 'Everything']
-        
-        # 获取所有进程
-        for proc in psutil.process_iter(['pid', 'name', 'exe']):
+    # 特殊应用处理
+    special_apps = config.get("special_apps", {})
+    special_app_instances = {}
+    
+    # 获取所有窗口
+    all_windows = gw.getAllWindows()
+    processed_windows = set()
+    
+    # 遍历所有窗口
+    for window in all_windows:
+        # 跳过无效窗口
+        if not window.visible or not window.title or window.title.strip() == "":
+            continue
+            
+        # 尝试获取进程ID和路径
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(window._hWnd)
+            proc = psutil.Process(pid)
+            process_path = proc.exe()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, Exception):
+                        continue
+            
+        # 跳过排除的应用程序
+        if os.path.basename(process_path).lower() in excluded_exes:
+                        continue
+            
+        # 检查是否已处理过此窗口（通过窗口标题和进程路径判断）
+        window_key = f"{window.title}::{process_path}"
+        if window_key in processed_windows:
+            continue
+        processed_windows.add(window_key)
+    
+        # 检查是否是浏览器窗口
+        browser_info = is_browser_window(process_path, window.title)
+        if browser_info:
+            browser_name, browser_type = browser_info
+            
+            # 获取浏览器标签页
+            browser_tabs = []
             try:
-                proc_info = proc.info
-                proc_name = proc_info['name'] if 'name' in proc_info else ""
-                proc_exe = proc_info['exe'] if 'exe' in proc_info else ""
+                # 传递窗口标题，以便获取特定于此窗口的标签页
+                browser_tabs = get_browser_tabs(process_path, window.title, config)
+            except Exception as e:
+                logger.error(f"获取浏览器标签页时出错: {e}")
+            
+            # 保存浏览器窗口信息
+            browser_data = {
+                "title": window.title,
+                "process_path": process_path,
+                "pid": pid,
+                "browser_name": browser_name,
+                "browser_type": browser_type,
+                "tabs": browser_tabs,
+                "tab_count": len(browser_tabs)
+            }
+            session_data["browser_windows"].append(browser_data)
+            continue
+        
+        # 处理特殊应用
+        process_name = os.path.basename(process_path).lower()
+        if process_name in special_apps:
+            if process_name not in special_app_instances:
+                special_app_instances[process_name] = True
+                logger.info(f"发现特殊应用: {process_name} (PID: {pid}, 路径: {process_path})")
                 
-                # 检查进程名是否包含特殊应用名称
-                is_special = False
-                matching_app = ""
-                for app in special_apps:
-                    if (app.lower() in proc_name.lower() or 
-                        (proc_exe and app.lower() in proc_exe.lower())):
-                        is_special = True
-                        matching_app = app
-                        break
-                
-                # 特殊处理：通过进程名精确匹配
-                if not is_special:
-                    # Everything 搜索工具的进程名通常是 Everything.exe
-                    if proc_name.lower() == "everything.exe":
-                        is_special = True
-                        matching_app = "Everything"
-                
-                if is_special and proc_exe and proc_exe not in processed_app_paths:
-                    # 将特殊应用添加到会话列表
-                    logger.info(f"发现特殊应用: {proc_name} (PID: {proc_info['pid']}, 路径: {proc_exe})")
-                    window_info = {
-                        "type": "application",
-                        "title": f"{matching_app} 应用窗口",
-                        "path": proc_exe,
+                app_data = {
+                    "title": f"{special_apps[process_name]} 应用窗口",
+                    "process_path": process_path,
+                    "pid": pid,
                         "special_app": True
                     }
-                    session_items.append(window_info)
-                    processed_app_paths.add(proc_exe)
-                    logger.debug(f"收集到特殊应用: '{matching_app}' ({proc_exe})")
-                    
-                    # 尝试查找该进程的所有窗口
-                    def enum_windows_callback(hwnd, pid):
-                        try:
-                            _, win_pid = win32process.GetWindowThreadProcessId(hwnd)
-                            if win_pid == pid:
-                                title = win32gui.GetWindowText(hwnd)
-                                if title:
-                                    logger.debug(f"  - 找到特殊应用窗口: {title} (HWND: {hwnd})")
-                        except Exception as e:
-                            logger.debug(f"枚举特殊应用窗口时出错: {e}")
-                        return True
-                    
-                    win32gui.EnumWindows(lambda hwnd, lParam: enum_windows_callback(hwnd, proc_info['pid']), None)
-            except Exception as e:
-                logger.debug(f"处理特殊应用进程时出错: {e}")
-    except Exception as e:
-        logger.error(f"使用win32gui收集特殊应用窗口时发生错误: {e}", exc_info=True)
+                session_data["applications"].append(app_data)
+            continue
+        
+        # 处理普通应用
+        app_data = {
+            "title": window.title,
+            "process_path": process_path,
+            "pid": pid
+        }
+        session_data["applications"].append(app_data)
     
-    logger.info(f"会话数据收集完成。共收集到 {len(session_items)} 个相关窗口/应用条目。")
-    return session_items
+    logger.info(f"会话数据收集完成。共收集到 {len(session_data['applications']) + len(session_data['browser_windows'])} 个相关窗口/应用条目。")
+    return session_data
 
 # --- 会话数据文件管理 ---
 def load_all_sessions(config):
@@ -183,180 +172,178 @@ def save_all_sessions(all_sessions_data, config):
         logger.error(f"保存所有会话数据时发生错误: {e}", exc_info=True)
 
 # --- 会话恢复 ---
-def restore_specific_session_core(session_items, config):
-    """恢复特定会话"""
-    from session_manager.utils import get_process_path_from_hwnd, is_browser_process
-    
-    # 尝试导入浏览器标签页恢复功能
-    try:
-        from session_manager.browser_tabs import restore_browser_tabs
-        browser_tabs_support = True
-    except ImportError:
-        browser_tabs_support = False
-    
-    if not session_items:
-        logger.info("没有会话条目可用于恢复。")
-        return
-        
+def restore_session(session_data, config):
+    """恢复保存的会话"""
     logger.info("开始恢复会话...")
-    restored_count = 0
-    failed_count = 0
-    window_title_similarity_threshold = config.get("window_title_similarity_threshold", get_default_config()["window_title_similarity_threshold"])
-    restore_delay_seconds = config.get("restore_delay_seconds", get_default_config()["restore_delay_seconds"])
+    success_count = 0
+    fail_count = 0
     
-    # 首先处理非浏览器应用
-    non_browser_items = [item for item in session_items if item.get("type") != "browser"]
-    browser_items = [item for item in session_items if item.get("type") == "browser"]
-    
-    # 恢复非浏览器应用
-    for window_info in non_browser_items:
-        app_path = window_info.get("path")
-        app_title = window_info.get("title")
-        item_type = window_info.get("type", "unknown")
-        is_special_app = window_info.get("special_app", False)
+    # 检查会话数据结构
+    if not session_data:
+        logger.warning("会话数据为空，无内容可恢复")
+        return 0, 0
         
-        if not app_path:
-            logger.warning(f"跳过没有路径的会话条目: {window_info}")
-            failed_count += 1
-            continue
-            
-        logger.info(f"\n尝试恢复 ({item_type}): '{app_title}' (路径: {app_path})")
+    # 兼容旧格式的会话数据
+    if isinstance(session_data, list):
+        # 旧格式：直接是项目列表
+        applications = []
+        browser_windows = []
         
-        # 检查应用是否已经在运行
-        already_running = False
-        windows = gw.getAllWindows()
-        for window in windows:
-            if not window.title:
+        for item in session_data:
+            if not isinstance(item, dict):
                 continue
-            
-            # 使用相似度比较窗口标题
-            similarity = difflib.SequenceMatcher(None, window.title.lower(), app_title.lower()).ratio()
-            if similarity >= window_title_similarity_threshold:
-                logger.info(f"  - 应用已在运行: '{window.title}' (相似度: {similarity:.2f})")
-                already_running = True
-                restored_count += 1
-                break
-        
-        # 如果是特殊应用，检查进程是否在运行
-        if is_special_app and not already_running:
-            for proc in psutil.process_iter(['pid', 'name', 'exe']):
-                if proc.info['exe'] and os.path.normcase(proc.info['exe']) == os.path.normcase(app_path):
-                    logger.info(f"  - 特殊应用进程已在运行: {app_path}")
-                    already_running = True
-                    restored_count += 1
-                    break
-        
-        # 如果应用未运行，尝试启动
-        if not already_running:
+                
+            item_type = item.get("type")
+            if item_type == "browser":
+                # 转换为新格式的浏览器窗口
+                browser_windows.append({
+                    "title": item.get("title", "未知浏览器"),
+                    "process_path": item.get("path", ""),
+                    "pid": 0,
+                    "browser_name": "未知",
+                    "browser_type": "chrome",
+                    "tabs": item.get("urls", []),
+                    "tab_count": len(item.get("urls", []))
+                })
+            else:
+                # 转换为新格式的应用
+                applications.append({
+                    "title": item.get("title", "未知应用"),
+                    "process_path": item.get("path", ""),
+                    "pid": 0,
+                    "special_app": item.get("special_app", False)
+                })
+                
+        # 使用转换后的新格式数据
+        session_data = {
+            "applications": applications,
+            "browser_windows": browser_windows
+        }
+    
+    # 1. 恢复应用程序
+    if "applications" in session_data and isinstance(session_data["applications"], list):
+        for app in session_data["applications"]:
             try:
-                logger.info(f"  - 启动应用: {app_path}")
-                subprocess.Popen([app_path])
-                restored_count += 1
-                time.sleep(restore_delay_seconds)
-            except Exception as e:
-                logger.error(f"  - 启动应用失败: {e}")
-                failed_count += 1
-    
-    # 恢复浏览器和标签页
-    if browser_tabs_support:
-        for browser_info in browser_items:
-            app_path = browser_info.get("path")
-            app_title = browser_info.get("title")
-            urls = browser_info.get("urls", [])
-            
-            if not app_path:
-                logger.warning(f"跳过没有路径的浏览器条目: {browser_info}")
-                failed_count += 1
-                continue
-                
-            logger.info(f"\n尝试恢复浏览器: '{app_title}' (路径: {app_path})")
-            
-            # 检查浏览器是否已经在运行
-            already_running = False
-            windows = gw.getAllWindows()
-            for window in windows:
-                if not window.title:
-                    continue
-                
-                # 使用相似度比较窗口标题
-                similarity = difflib.SequenceMatcher(None, window.title.lower(), app_title.lower()).ratio()
-                if similarity >= window_title_similarity_threshold:
-                    logger.info(f"  - 浏览器已在运行: '{window.title}' (相似度: {similarity:.2f})")
-                    already_running = True
-                    break
-            
-            # 恢复浏览器标签页
-            if urls:
-                logger.info(f"  - 尝试恢复 {len(urls)} 个标签页")
-                browser_exe = os.path.basename(app_path)
-                
-                if restore_browser_tabs(browser_exe, urls, config):
-                    logger.info(f"  - 成功发送标签页恢复请求")
-                    restored_count += 1
+                logger.info(f"\n尝试恢复 (application): '{app['title']}' (路径: {app['process_path']})")
+                result = restore_application(app, config)
+                if result:
+                    success_count += 1
                 else:
-                    logger.warning(f"  - 标签页恢复失败")
-                    
-                    # 如果标签页恢复失败但浏览器未运行，尝试启动浏览器
-                    if not already_running:
-                        try:
-                            logger.info(f"  - 启动浏览器: {app_path}")
-                            subprocess.Popen([app_path])
-                            restored_count += 1
-                            time.sleep(restore_delay_seconds)
-                        except Exception as e:
-                            logger.error(f"  - 启动浏览器失败: {e}")
-                            failed_count += 1
-            elif not already_running:
-                # 如果没有标签页数据但浏览器未运行，直接启动浏览器
-                try:
-                    logger.info(f"  - 启动浏览器: {app_path}")
-                    subprocess.Popen([app_path])
-                    restored_count += 1
-                    time.sleep(restore_delay_seconds)
-                except Exception as e:
-                    logger.error(f"  - 启动浏览器失败: {e}")
-                    failed_count += 1
-    else:
-        # 如果不支持标签页恢复，按普通应用处理浏览器
-        for browser_info in browser_items:
-            app_path = browser_info.get("path")
-            app_title = browser_info.get("title")
-            
-            if not app_path:
-                logger.warning(f"跳过没有路径的浏览器条目: {browser_info}")
-                failed_count += 1
-                continue
-                
-            logger.info(f"\n尝试恢复浏览器: '{app_title}' (路径: {app_path})")
-            
-            # 检查浏览器是否已经在运行
-            already_running = False
-            windows = gw.getAllWindows()
-            for window in windows:
-                if not window.title:
-                    continue
-                
-                # 使用相似度比较窗口标题
-                similarity = difflib.SequenceMatcher(None, window.title.lower(), app_title.lower()).ratio()
-                if similarity >= window_title_similarity_threshold:
-                    logger.info(f"  - 浏览器已在运行: '{window.title}' (相似度: {similarity:.2f})")
-                    already_running = True
-                    restored_count += 1
-                    break
-            
-            # 如果浏览器未运行，尝试启动
-            if not already_running:
-                try:
-                    logger.info(f"  - 启动浏览器: {app_path}")
-                    subprocess.Popen([app_path])
-                    restored_count += 1
-                    time.sleep(restore_delay_seconds)
-                except Exception as e:
-                    logger.error(f"  - 启动浏览器失败: {e}")
-                    failed_count += 1
+                    fail_count += 1
+            except Exception as e:
+                logger.error(f"恢复应用程序时发生错误: {e}")
+                fail_count += 1
     
-    logger.info(f"\n会话恢复完成。成功: {restored_count}, 失败: {failed_count}")
-    return restored_count, failed_count
+    # 2. 恢复浏览器窗口
+    if "browser_windows" in session_data and isinstance(session_data["browser_windows"], list):
+        for browser in session_data["browser_windows"]:
+            try:
+                logger.info(f"\n尝试恢复浏览器: '{browser['title']}' (路径: {browser['process_path']})")
+                if "tab_count" in browser and browser["tab_count"] > 0:
+                    logger.info(f"  - 尝试恢复 {browser['tab_count']} 个标签页")
+                result = restore_browser(browser, config)
+                if result:
+                    success_count += 1
+                else:
+                    fail_count += 1
+            except Exception as e:
+                logger.error(f"恢复浏览器时发生错误: {e}")
+                fail_count += 1
+    
+    logger.info(f"\n会话恢复完成。成功: {success_count}, 失败: {fail_count}")
+    return success_count, fail_count
+
+def restore_browser(browser_data, config):
+    """恢复浏览器会话，创建新窗口并加载所有标签页"""
+    from session_manager.browser_tabs import restore_browser_tabs
+    
+    browser_path = browser_data.get("process_path", "")
+    browser_title = browser_data.get("title", "")
+    browser_tabs = browser_data.get("tabs", [])
+    
+    if not browser_path or not os.path.isfile(browser_path):
+        logger.warning(f"浏览器路径无效: {browser_path}")
+        return False
+    
+    # 恢复浏览器标签页到新窗口
+    if browser_tabs:
+        try:
+            result = restore_browser_tabs(browser_path, browser_title, browser_tabs, config)
+            if result:
+                logger.info("  - 成功创建新窗口并恢复标签页")
+                return True
+            else:
+                logger.warning("  - 无法恢复浏览器标签页")
+        except Exception as e:
+            logger.error(f"  - 恢复浏览器标签页时出错: {e}")
+    else:
+        logger.warning("  - 没有标签页数据可恢复")
+    
+    return False
+
+def is_browser_window(process_path, window_title):
+    """判断是否是浏览器窗口，返回浏览器名称和类型"""
+    process_name = os.path.basename(process_path).lower()
+    
+    browsers = {
+        "chrome.exe": ("Google Chrome", "chrome"),
+        "msedge.exe": ("Microsoft Edge", "chrome"),
+        "firefox.exe": ("Firefox", "firefox"),
+        "brave.exe": ("Brave", "chrome"),
+        "opera.exe": ("Opera", "opera"),
+        "vivaldi.exe": ("Vivaldi", "chrome"),
+        "360chrome.exe": ("360极速浏览器", "chrome"),
+        "360se.exe": ("360安全浏览器", "chrome")
+    }
+    
+    if process_name in browsers:
+        return browsers[process_name]
+    
+    return None
+
+def restore_application(app_data, config):
+    """恢复普通应用程序"""
+    app_title = app_data.get("title", "")
+    app_path = app_data.get("process_path", "")
+    app_pid = app_data.get("pid", 0)
+    is_special_app = app_data.get("special_app", False)
+    
+    if not app_path or not os.path.isfile(app_path):
+        logger.warning(f"应用路径无效: {app_path}")
+        return False
+    
+    # 检查应用是否已在运行
+    # 1. 首先尝试通过标题匹配
+    windows = gw.getAllWindows()
+    for window in windows:
+        if not window.title:
+            continue
+        
+        # 使用相似度比较窗口标题
+        similarity = difflib.SequenceMatcher(None, window.title.lower(), app_title.lower()).ratio()
+        if similarity >= 0.7:  # 70%相似度阈值
+            logger.info(f"  - 应用已在运行: '{window.title}' (相似度: {similarity:.2f})")
+            return True
+    
+    # 2. 尝试通过进程路径匹配
+    for proc in psutil.process_iter(['pid', 'exe']):
+        if proc.info['exe'] and proc.info['exe'] == app_path:
+            if is_special_app:
+                logger.info(f"  - 特殊应用进程已在运行: {app_path}")
+            else:
+                logger.info(f"  - 应用进程已在运行: {app_path}")
+            return True
+    
+    # 应用未运行，尝试启动
+    try:
+        logger.info(f"  - 启动应用: {app_path}")
+        subprocess.Popen([app_path])
+        # 等待短暂时间，给应用启动留出时间
+        time.sleep(1)
+        return True
+    except Exception as e:
+        logger.error(f"  - 启动应用失败: {e}")
+        return False
 
 # --- SessionManager 类 ---
 class SessionManager:
@@ -448,7 +435,7 @@ class SessionManager:
             return self.save_sessions()
         except Exception as e:
             logging.error(f"导入会话失败: {e}")
-            return False
+            return False 
 
 # 添加以下函数来支持窗口预览功能
 def create_session_preview(session_data, config, preview_size=(800, 600)):
