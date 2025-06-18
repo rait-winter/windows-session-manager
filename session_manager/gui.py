@@ -1,12 +1,24 @@
 """
 gui.py
-Tkinter 图形界面相关模块。
+会话管理器图形界面。
 """
 
+import os
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog, scrolledtext
-from session_manager.core import collect_session_data_core, restore_specific_session_core
 import logging
+import threading
+import time
+import json
+import queue
+from datetime import datetime
+from functools import partial
+import webbrowser
+from ttkthemes import ThemedTk
+import keyboard
+from PIL import Image, ImageTk
+import winshell
 import pygetwindow as gw
 from session_manager.utils import get_process_path_from_hwnd
 import win32gui
@@ -14,15 +26,86 @@ import win32process
 import psutil
 import win32con
 
-class GuiLogHandler(logging.Handler):
-    def __init__(self, gui_app):
-        super().__init__()
-        self.gui_app = gui_app
+from . import config
+from .core import collect_session_data_core, restore_specific_session_core
 
+# 日志记录器
+logger = logging.getLogger(__name__)
+
+# 全局样式常量
+PADDING = 5
+LARGE_PADDING = 10
+BUTTON_WIDTH = 15
+FONT = ("Segoe UI", 10)
+TITLE_FONT = ("Segoe UI", 12, "bold")
+HEADER_FONT = ("Segoe UI", 11, "bold")
+DEFAULT_THEME = "vista"  # 可选: 'winnative', 'clam', 'alt', 'default', 'classic', 'vista', 'xpnative'
+
+# 颜色方案
+COLORS = {
+    "light": {
+        "bg": "#f0f0f0",
+        "fg": "#333333",
+        "button_bg": "#e1e1e1",
+        "highlight_bg": "#dae5f4",
+        "highlight_fg": "#2e5c8a",
+        "session_bg": "#ffffff",
+        "session_fg": "#333333",
+        "border": "#cccccc",
+        "success": "#4caf50",
+        "warning": "#ff9800",
+        "error": "#f44336",
+        "info": "#2196f3"
+    },
+    "dark": {
+        "bg": "#2d2d2d",
+        "fg": "#e0e0e0",
+        "button_bg": "#444444",
+        "highlight_bg": "#364859",
+        "highlight_fg": "#81b3e0",
+        "session_bg": "#383838",
+        "session_fg": "#e0e0e0",
+        "border": "#555555",
+        "success": "#4caf50",
+        "warning": "#ff9800",
+        "error": "#f44336",
+        "info": "#2196f3"
+    }
+}
+
+class GuiLogHandler(logging.Handler):
+    """将日志信息发送到GUI"""
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.log_queue = queue.Queue()
+        self.start_queue_listener()
+    
     def emit(self, record):
-        msg = self.format(record)
-        # 线程安全地写入 GUI
-        self.gui_app.root.after(0, self.gui_app.log_to_gui, msg)
+        log_entry = self.format(record)
+        self.log_queue.put((record.levelno, log_entry))
+    
+    def start_queue_listener(self):
+        """启动一个线程监听日志队列"""
+        def check_queue():
+            try:
+                while True:
+                    try:
+                        level, message = self.log_queue.get_nowait()
+                        if hasattr(self.app, 'add_log_message'):
+                            self.app.add_log_message(level, message)
+                        self.log_queue.task_done()
+                    except queue.Empty:
+                        break
+            except Exception as e:
+                print(f"日志队列处理错误: {e}")
+            finally:
+                # 每100ms检查一次队列
+                self.app.root.after(100, check_queue)
+        
+        # 开始首次检查
+        self.app.root.after(100, check_queue)
 
 class SessionManagerApp:
     def __init__(self, root, config, session_manager):
@@ -616,3 +699,24 @@ class SessionManagerApp:
         self.log_text.insert(tk.END, '\n' + '='*50 + '\n[列表完成]\n')
         self.log_text.config(state='disabled')
         self.log_text.see(tk.END) 
+
+    def add_log_message(self, level, message):
+        """添加日志消息到GUI"""
+        self.log_text.config(state='normal')
+        
+        # 根据日志级别选择颜色
+        tag = None
+        if level >= logging.ERROR:
+            tag = "error"
+            self.log_text.tag_config("error", foreground="red")
+        elif level >= logging.WARNING:
+            tag = "warning"
+            self.log_text.tag_config("warning", foreground="orange")
+        elif level >= logging.INFO:
+            tag = "info"
+            self.log_text.tag_config("info", foreground="blue")
+        
+        # 插入日志消息
+        self.log_text.insert(tk.END, message + '\n', tag)
+        self.log_text.see(tk.END)
+        self.log_text.config(state='disabled') 

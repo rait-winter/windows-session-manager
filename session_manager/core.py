@@ -12,6 +12,12 @@ import time
 import logging
 import pygetwindow as gw
 from session_manager.config import get_default_config
+from PIL import Image, ImageDraw, ImageGrab
+import win32gui
+import win32con
+import win32process
+import win32api
+import psutil
 
 # 需要从主程序导入的工具函数（如 get_process_path_from_hwnd、is_browser_process）
 # 这里假设后续会迁移这些函数到 utils.py 或 core.py 内部
@@ -348,4 +354,145 @@ class SessionManager:
             return self.save_sessions()
         except Exception as e:
             logging.error(f"导入会话失败: {e}")
-            return False 
+            return False
+
+# 添加以下函数来支持窗口预览功能
+def create_session_preview(session_data, config, preview_size=(800, 600)):
+    """
+    创建会话窗口布局的预览图像
+    
+    参数:
+        session_data: 会话数据字典
+        config: 配置字典
+        preview_size: 预览图像的大小 (宽, 高)
+        
+    返回:
+        PIL.Image 对象
+    """
+    try:
+        if not session_data or "windows" not in session_data:
+            return None
+            
+        # 获取屏幕尺寸信息
+        monitor_info = []
+        def callback(monitor, dc, rect, data):
+            monitor_info.append({
+                'left': rect[0],
+                'top': rect[1],
+                'width': rect[2] - rect[0],
+                'height': rect[3] - rect[1]
+            })
+            return True
+            
+        win32api.EnumDisplayMonitors(None, None, callback, None)
+        
+        if not monitor_info:
+            return None
+            
+        # 计算所有显示器的总边界
+        min_x = min(m['left'] for m in monitor_info)
+        min_y = min(m['top'] for m in monitor_info)
+        max_x = max(m['left'] + m['width'] for m in monitor_info)
+        max_y = max(m['top'] + m['height'] for m in monitor_info)
+        
+        total_width = max_x - min_x
+        total_height = max_y - min_y
+        
+        # 创建预览图像
+        scale_factor = min(preview_size[0] / total_width, preview_size[1] / total_height)
+        preview_width = int(total_width * scale_factor)
+        preview_height = int(total_height * scale_factor)
+        
+        preview = Image.new('RGB', (preview_width, preview_height), color=(240, 240, 240))
+        draw = ImageDraw.Draw(preview)
+        
+        # 绘制显示器边框
+        for m in monitor_info:
+            x1 = int((m['left'] - min_x) * scale_factor)
+            y1 = int((m['top'] - min_y) * scale_factor)
+            x2 = int(x1 + m['width'] * scale_factor)
+            y2 = int(y1 + m['height'] * scale_factor)
+            
+            # 绘制显示器外框
+            draw.rectangle([x1, y1, x2, y2], outline=(0, 0, 0), width=2)
+            
+            # 绘制显示器内部
+            draw.rectangle([x1+2, y1+2, x2-2, y2-2], fill=(255, 255, 255))
+        
+        # 绘制窗口
+        colors = [
+            (52, 152, 219),  # 蓝色
+            (46, 204, 113),  # 绿色
+            (155, 89, 182),  # 紫色
+            (230, 126, 34),  # 橙色
+            (231, 76, 60),   # 红色
+            (241, 196, 15)   # 黄色
+        ]
+        
+        for i, window in enumerate(session_data["windows"]):
+            if "rect" in window:
+                rect = window["rect"]
+                
+                # 计算窗口在预览中的位置
+                x1 = int((rect["left"] - min_x) * scale_factor)
+                y1 = int((rect["top"] - min_y) * scale_factor)
+                x2 = int(x1 + rect["width"] * scale_factor)
+                y2 = int(y1 + rect["height"] * scale_factor)
+                
+                # 确保窗口在预览区域内
+                x1 = max(0, min(x1, preview_width-1))
+                y1 = max(0, min(y1, preview_height-1))
+                x2 = max(0, min(x2, preview_width-1))
+                y2 = max(0, min(y2, preview_height-1))
+                
+                # 如果窗口太小，至少确保它是可见的
+                if x2 - x1 < 5:
+                    x2 = x1 + 5
+                if y2 - y1 < 5:
+                    y2 = y1 + 5
+                
+                # 绘制窗口
+                color = colors[i % len(colors)]
+                draw.rectangle([x1, y1, x2, y2], fill=color, outline=(0, 0, 0), width=1)
+                
+                # 如果窗口足够大，添加标题文本
+                if y2 - y1 > 20 and x2 - x1 > 50:
+                    title = window.get("title", "")
+                    if len(title) > 20:
+                        title = title[:17] + "..."
+                    draw.text((x1+5, y1+5), title, fill=(255, 255, 255))
+        
+        return preview
+    except Exception as e:
+        logging.error(f"创建会话预览失败: {e}", exc_info=True)
+        return None
+
+def capture_window_thumbnail(hwnd, size=(200, 150)):
+    """
+    捕获指定窗口的缩略图
+    
+    参数:
+        hwnd: 窗口句柄
+        size: 缩略图大小
+        
+    返回:
+        PIL.Image 对象或 None（如果捕获失败）
+    """
+    try:
+        # 获取窗口位置
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        width = right - left
+        height = bottom - top
+        
+        if width <= 0 or height <= 0:
+            return None
+            
+        # 截取窗口图像
+        screenshot = ImageGrab.grab((left, top, right, bottom))
+        
+        # 调整大小
+        thumbnail = screenshot.resize(size, Image.LANCZOS)
+        return thumbnail
+    except Exception as e:
+        logging.error(f"捕获窗口缩略图失败 (hwnd={hwnd}): {e}", exc_info=True)
+        return None 

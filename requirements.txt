@@ -1,0 +1,11 @@
+pygetwindow>=0.0.9
+pywin32>=228
+psutil>=5.8.0
+Pillow>=8.2.0
+keyboard>=0.13.5
+winshell>=0.6
+ttkthemes>=3.2.0
+appdirs>=1.4.4
+websockets>=10.0
+requests>=2.25.0
+websocket-client>=1.2.1 
