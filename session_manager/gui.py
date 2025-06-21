@@ -254,12 +254,22 @@ class SessionManagerApp:
 
     def save_session(self):
         try:
-            items = collect_session_data(self.config)
-            self.session_manager.set_session(self.current_session_name, items)
-            self.current_session_items = items
+            # 收集会话数据
+            session_data = collect_session_data(self.config)
+            
+            # 保存会话数据
+            self.session_manager.set_session(self.current_session_name, session_data)
+            self.current_session_items = session_data
+            
+            # 刷新窗口列表
             self.refresh_window_list()
-            self.status_bar.config(text=f"会话 '{self.current_session_name}' 已保存。")
-            messagebox.showinfo("保存成功", f"会话 '{self.current_session_name}' 已保存。")
+            
+            # 更新状态栏
+            app_count = len(session_data.get("applications", []))
+            self.status_bar.config(text=f"会话 '{self.current_session_name}' 已保存。包含 {app_count} 个应用。")
+            
+            # 显示成功消息
+            messagebox.showinfo("保存成功", f"会话 '{self.current_session_name}' 已保存。\n共包含 {app_count} 个应用。")
         except Exception as e:
             logger.error(f"保存会话时出错: {e}", exc_info=True)
             self.log_to_gui(f"保存会话失败: {e}")
@@ -267,12 +277,18 @@ class SessionManagerApp:
 
     def restore_session(self):
         try:
-            if not self.current_session_items:
+            # 获取当前会话数据
+            session_data = self.get_session_data(self.current_session_name)
+            
+            # 检查会话数据是否为空
+            if not session_data or not session_data.get("applications"):
                 messagebox.showwarning("恢复失败", "当前会话没有可恢复的应用。")
                 return
                 
-            success_count, fail_count = restore_session(self.current_session_items, self.config)
+            # 恢复会话
+            success_count, fail_count = restore_session(session_data, self.config)
             
+            # 显示结果
             if success_count == 0 and fail_count == 0:
                 self.status_bar.config(text=f"会话 '{self.current_session_name}' 没有内容可恢复。")
                 messagebox.showinfo("恢复完成", f"会话 '{self.current_session_name}' 没有内容可恢复。")
@@ -767,92 +783,37 @@ class SessionManagerApp:
             self.log_to_gui("会话数据为空")
             return
             
-        # 兼容旧版会话数据格式
-        if isinstance(session_data, list):
-            # 按类型分组：浏览器和应用程序
-            browsers = []
-            applications = []
-            
-            for window_info in session_data:
-                if not isinstance(window_info, dict):
-                    self.log_to_gui(f"警告：会话数据中存在非法项（类型：{type(window_info)}，值：{window_info}），已跳过。")
-                    continue
-                    
-                window_type = window_info.get("type", "unknown")
-                if window_type == "browser":
-                    browsers.append(window_info)
-                else:
-                    applications.append(window_info)
-        else:
-            # 新版会话数据格式：包含applications和browser_windows两个键
-            browsers = session_data.get("browser_windows", [])
-            applications = session_data.get("applications", [])
-                
-        # 添加浏览器窗口到列表
-        for browser_info in browsers:
-            if not isinstance(browser_info, dict):
-                continue
-                
-            # 适配不同的数据结构
-            window_title = browser_info.get("title", "未知浏览器")
-            window_path = browser_info.get("path") or browser_info.get("process_path", "")
-            
-            # 处理标签页：兼容不同的键名
-            if "tabs" in browser_info:
-                urls = browser_info["tabs"]
-            elif "urls" in browser_info:
-                urls = browser_info["urls"]
-            else:
-                urls = []
-                
-            has_tabs = len(urls) > 0
-            
-            # 添加浏览器主条目
-            browser_icon = self.get_icon_for_type("browser")
-            browser_id = self.window_listbox.insert("", "end", text=window_title, 
-                                       values=("browser", window_path),
-                                       image=browser_icon,
-                                       open=False)  # 默认折叠
-            
-            # 如果有标签页，添加为子条目
-            if has_tabs:
-                # 第一个子条目显示标签页总数
-                tab_count_id = self.window_listbox.insert(browser_id, "end", 
-                                       text=f"包含 {len(urls)} 个标签页", 
-                                       values=("tab_count", ""),
-                                       image=self.get_icon_for_type("info"))
-                
-                # 添加各个标签页
-                for i, tab in enumerate(urls):
-                    # 兼容不同的标签页数据结构
-                    if isinstance(tab, dict):
-                        tab_title = tab.get("title", "无标题")
-                        tab_url = tab.get("url", "")
-                    elif isinstance(tab, str):
-                        tab_title = f"标签页 {i+1}"
-                        tab_url = tab
-                    else:
-                        continue
-                    
-                    # 截断过长的标题
-                    if len(tab_title) > 50:
-                        tab_title = tab_title[:47] + "..."
-                        
-                    # 添加标签页条目
-                    self.window_listbox.insert(browser_id, "end", 
-                                     text=tab_title,
-                                     values=("tab", tab_url),
-                                     image=self.get_icon_for_type("tab"))
+        # 获取应用程序列表
+        applications = []
         
-        # 添加其他应用到列表
+        # 处理不同的数据格式
+        if isinstance(session_data, dict) and "applications" in session_data:
+            # 新格式：包含applications键
+            applications = session_data.get("applications", [])
+        elif isinstance(session_data, list):
+            # 旧格式：直接是列表
+            applications = session_data
+        else:
+            self.log_to_gui(f"警告：会话数据格式无效（类型：{type(session_data)}），已跳过。")
+            return
+        
+        # 添加应用到列表
         for app_info in applications:
             if not isinstance(app_info, dict):
+                self.log_to_gui(f"警告：应用数据无效（类型：{type(app_info)}），已跳过。")
                 continue
                 
-            # 适配不同的数据结构
+            # 获取应用信息
             window_title = app_info.get("title", "未知应用")
             window_path = app_info.get("path") or app_info.get("process_path", "")
-            window_type = app_info.get("type", "application")
+            
+            # 确定应用类型
+            if app_info.get("is_browser", False):
+                window_type = "browser"
+            elif app_info.get("special_app", False):
+                window_type = "special"
+            else:
+                window_type = "application"
             
             # 添加应用条目
             app_icon = self.get_icon_for_type(window_type)

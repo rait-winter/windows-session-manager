@@ -19,30 +19,9 @@ import win32process
 import win32api
 import psutil
 
-# 导入浏览器标签页支持模块
-try:
-    # 尝试导入混合标签页管理器
-    from session_manager.hybrid_tabs import (
-        get_browser_tabs_hybrid as get_browser_tabs,
-        restore_browser_tabs_hybrid as restore_browser_tabs,
-        initialize_websocket_server
-    )
-    BROWSER_TABS_SUPPORT = True
-    HYBRID_TABS_SUPPORT = True
-    # 初始化WebSocket服务器
-    try:
-        initialize_websocket_server()
-    except Exception as e:
-        logging.warning(f"初始化WebSocket服务器失败: {e}")
-except ImportError:
-    # 回退到静态提取方法
-    try:
-        from session_manager.browser_tabs import get_browser_tabs, restore_browser_tabs
-        BROWSER_TABS_SUPPORT = True
-        HYBRID_TABS_SUPPORT = False
-    except ImportError:
-        BROWSER_TABS_SUPPORT = False
-        HYBRID_TABS_SUPPORT = False
+# 禁用浏览器标签页支持
+BROWSER_TABS_SUPPORT = False
+HYBRID_TABS_SUPPORT = False
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +36,40 @@ def collect_session_data(config):
     excluded_exes = [os.path.basename(app).lower() for app in excluded_apps]
     
     # 特殊应用处理
-    special_apps = config.get("special_apps", {})
+    special_apps = {
+        "everything.exe": "Everything搜索",
+        "pixpin.exe": "PixPin截图",
+        "fastorange.exe": "FastOrange",
+        "snipaste.exe": "Snipaste截图",
+        "ditto.exe": "Ditto剪贴板",
+        "listary.exe": "Listary搜索"
+    }
+    
+    # 更新配置中的特殊应用
+    if "special_apps" in config:
+        special_apps.update(config.get("special_apps", {}))
+    
     special_app_instances = {}
     
     # 获取所有窗口
     all_windows = gw.getAllWindows()
     processed_windows = set()
+    
+    # 先查找所有特殊应用进程，确保即使没有可见窗口也能被捕获
+    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+        try:
+            proc_name = proc.info['name'].lower() if 'name' in proc.info else ""
+            proc_exe = proc.info['exe'] if 'exe' in proc.info else ""
+            
+            if proc_name in special_apps:
+                special_app_instances[proc_name] = {
+                    "pid": proc.info['pid'],
+                    "path": proc_exe,
+                    "found": False
+                }
+                logger.info(f"发现特殊应用进程: {proc_name} (PID: {proc.info['pid']}, 路径: {proc_exe})")
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, Exception):
+            continue
     
     # 遍历所有窗口
     for window in all_windows:
@@ -75,12 +82,13 @@ def collect_session_data(config):
             _, pid = win32process.GetWindowThreadProcessId(window._hWnd)
             proc = psutil.Process(pid)
             process_path = proc.exe()
+            process_name = os.path.basename(process_path).lower()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, Exception):
-                        continue
+            continue
             
         # 跳过排除的应用程序
-        if os.path.basename(process_path).lower() in excluded_exes:
-                        continue
+        if process_name in excluded_exes:
+            continue
             
         # 检查是否已处理过此窗口（通过窗口标题和进程路径判断）
         window_key = f"{window.title}::{process_path}"
@@ -88,46 +96,35 @@ def collect_session_data(config):
             continue
         processed_windows.add(window_key)
     
-        # 检查是否是浏览器窗口
+        # 检查是否是浏览器窗口 - 跳过浏览器窗口处理
         browser_info = is_browser_window(process_path, window.title)
         if browser_info:
+            # 将浏览器窗口作为普通应用程序处理
             browser_name, browser_type = browser_info
-            
-            # 获取浏览器标签页
-            browser_tabs = []
-            try:
-                # 使用混合标签页管理器获取标签页
-                browser_tabs = get_browser_tabs(process_path, window.title, config)
-            except Exception as e:
-                logger.error(f"获取浏览器标签页时出错: {e}")
-            
-            # 保存浏览器窗口信息
-            browser_data = {
+            app_data = {
                 "title": window.title,
                 "process_path": process_path,
                 "pid": pid,
-                "browser_name": browser_name,
-                "browser_type": browser_type,
-                "tabs": browser_tabs,
-                "tab_count": len(browser_tabs)
+                "is_browser": True,
+                "browser_name": browser_name
             }
-            session_data["browser_windows"].append(browser_data)
+            session_data["applications"].append(app_data)
             continue
         
         # 处理特殊应用
-        process_name = os.path.basename(process_path).lower()
         if process_name in special_apps:
-            if process_name not in special_app_instances:
-                special_app_instances[process_name] = True
-                logger.info(f"发现特殊应用: {process_name} (PID: {pid}, 路径: {process_path})")
-                
-                app_data = {
-                    "title": f"{special_apps[process_name]} 应用窗口",
-                    "process_path": process_path,
-                    "pid": pid,
-                        "special_app": True
-                    }
-                session_data["applications"].append(app_data)
+            if process_name in special_app_instances:
+                special_app_instances[process_name]["found"] = True
+            
+            app_data = {
+                "title": window.title or f"{special_apps[process_name]} 窗口",
+                "process_path": process_path,
+                "pid": pid,
+                "special_app": True,
+                "app_name": special_apps[process_name]
+            }
+            session_data["applications"].append(app_data)
+            logger.info(f"保存特殊应用窗口: {app_data['title']} (PID: {pid}, 路径: {process_path})")
             continue
         
         # 处理普通应用
@@ -138,7 +135,21 @@ def collect_session_data(config):
         }
         session_data["applications"].append(app_data)
     
-    logger.info(f"会话数据收集完成。共收集到 {len(session_data['applications']) + len(session_data['browser_windows'])} 个相关窗口/应用条目。")
+    # 处理没有找到窗口的特殊应用（如后台运行的应用）
+    for proc_name, info in special_app_instances.items():
+        if not info["found"] and proc_name in special_apps:
+            app_data = {
+                "title": f"{special_apps[proc_name]} (后台运行)",
+                "process_path": info["path"],
+                "pid": info["pid"],
+                "special_app": True,
+                "app_name": special_apps[proc_name],
+                "background": True
+            }
+            session_data["applications"].append(app_data)
+            logger.info(f"保存后台特殊应用: {app_data['title']} (PID: {info['pid']}, 路径: {info['path']})")
+    
+    logger.info(f"会话数据收集完成。共收集到 {len(session_data['applications'])} 个相关窗口/应用条目。")
     return session_data
 
 # --- 会话数据文件管理 ---
@@ -197,75 +208,29 @@ def restore_session(session_data, config):
     if not session_data:
         logger.warning("会话数据为空，无内容可恢复")
         return 0, 0
+    
+    # 恢复所有应用程序
+    applications = session_data.get("applications", [])
+    for app_data in applications:
+        is_browser = app_data.get("is_browser", False)
         
-    # 兼容旧格式的会话数据
-    if isinstance(session_data, list):
-        # 旧格式：直接是项目列表
-        applications = []
-        browser_windows = []
-        
-        for item in session_data:
-            if not isinstance(item, dict):
-                continue
-                
-            item_type = item.get("type")
-            if item_type == "browser":
-                # 转换为新格式的浏览器窗口
-                browser_windows.append({
-                    "title": item.get("title", "未知浏览器"),
-                    "process_path": item.get("path", ""),
-                    "pid": 0,
-                    "browser_name": "未知",
-                    "browser_type": "chrome",
-                    "tabs": item.get("urls", []),
-                    "tab_count": len(item.get("urls", []))
-                })
-            else:
-                # 转换为新格式的应用
-                applications.append({
-                    "title": item.get("title", "未知应用"),
-                    "process_path": item.get("path", ""),
-                    "pid": 0,
-                    "special_app": item.get("special_app", False)
-                })
-                
-        # 使用转换后的新格式数据
-        session_data = {
-            "applications": applications,
-            "browser_windows": browser_windows
-        }
+        if is_browser:
+            # 将浏览器作为普通应用程序恢复
+            logger.info(f"恢复浏览器应用: {app_data.get('title', 'Unknown')}")
+            success = restore_application(app_data, config)
+        else:
+            # 恢复普通应用程序
+            logger.info(f"恢复应用程序: {app_data.get('title', 'Unknown')}")
+            success = restore_application(app_data, config)
+            
+        if success:
+            success_count += 1
+        else:
+            fail_count += 1
     
-    # 1. 恢复应用程序
-    if "applications" in session_data and isinstance(session_data["applications"], list):
-        for app in session_data["applications"]:
-            try:
-                logger.info(f"\n尝试恢复 (application): '{app['title']}' (路径: {app['process_path']})")
-                result = restore_application(app, config)
-                if result:
-                    success_count += 1
-                else:
-                    fail_count += 1
-            except Exception as e:
-                logger.error(f"恢复应用程序时发生错误: {e}")
-                fail_count += 1
+    # 跳过浏览器窗口恢复
     
-    # 2. 恢复浏览器窗口
-    if "browser_windows" in session_data and isinstance(session_data["browser_windows"], list):
-        for browser in session_data["browser_windows"]:
-            try:
-                logger.info(f"\n尝试恢复浏览器: '{browser['title']}' (路径: {browser['process_path']})")
-                if "tab_count" in browser and browser["tab_count"] > 0:
-                    logger.info(f"  - 尝试恢复 {browser['tab_count']} 个标签页")
-                result = restore_browser(browser, config)
-                if result:
-                    success_count += 1
-                else:
-                    fail_count += 1
-            except Exception as e:
-                logger.error(f"恢复浏览器时发生错误: {e}")
-                fail_count += 1
-    
-    logger.info(f"\n会话恢复完成。成功: {success_count}, 失败: {fail_count}")
+    logger.info(f"会话恢复完成。成功: {success_count}, 失败: {fail_count}")
     return success_count, fail_count
 
 def restore_browser(browser_data, config):
@@ -353,6 +318,8 @@ def restore_application(app_data, config):
     app_path = app_data.get("process_path", "")
     app_pid = app_data.get("pid", 0)
     is_special_app = app_data.get("special_app", False)
+    is_background = app_data.get("background", False)
+    app_name = app_data.get("app_name", "")
     
     if not app_path or not os.path.isfile(app_path):
         logger.warning(f"应用路径无效: {app_path}")
@@ -388,14 +355,34 @@ def restore_application(app_data, config):
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
     
+    # 3. 对于特殊应用，检查进程名
+    if not app_exists and is_special_app:
+        app_basename = os.path.basename(app_path).lower()
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                proc_name = proc.info['name'].lower() if 'name' in proc.info else ""
+                if proc_name == app_basename:
+                    logger.info(f"特殊应用进程已在运行: {proc_name}")
+                    app_exists = True
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    
     # 如果应用已存在，则跳过恢复
     if app_exists:
-        logger.info(f"跳过恢复已存在的应用程序: {app_title}")
+        if is_special_app:
+            logger.info(f"跳过恢复已存在的特殊应用: {app_title}")
+        else:
+            logger.info(f"跳过恢复已存在的应用程序: {app_title}")
         return True
     
     # 应用未运行，尝试启动
     try:
-        logger.info(f"应用程序不存在，开始启动: {app_path}")
+        if is_special_app:
+            logger.info(f"特殊应用不存在，开始启动: {app_path}")
+        else:
+            logger.info(f"应用程序不存在，开始启动: {app_path}")
+            
         subprocess.Popen([app_path])
         # 等待短暂时间，给应用启动留出时间
         time.sleep(1)
@@ -413,48 +400,101 @@ class SessionManager:
         self.sessions = self.load_sessions()
 
     def load_sessions(self):
+        """加载会话数据，确保格式正确"""
         if not os.path.exists(self.session_file):
-            return {self.default_session_name: []}
+            logger.info(f"会话文件不存在，创建默认会话: {self.default_session_name}")
+            return {self.default_session_name: {"applications": []}}
+        
         try:
             with open(self.session_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            # 自动修正：只保留 value 为 list 的项，且列表元素为 dict
-            fixed = {}
-            for k, v in data.items():
-                if isinstance(v, list):
-                    # 进一步过滤，确保每个元素为 dict
-                    filtered = [item for item in v if isinstance(item, dict)]
-                    if len(filtered) < len(v):
-                        logging.warning(f"会话 '{k}' 中存在非法项，已自动跳过。")
-                    fixed[k] = filtered
+            
+            # 修复会话数据格式
+            fixed_data = {}
+            for session_name, session_value in data.items():
+                # 检查会话数据格式
+                if isinstance(session_value, list):
+                    # 旧格式：直接是应用列表
+                    logger.info(f"转换旧格式会话数据: {session_name}")
+                    fixed_data[session_name] = {"applications": session_value}
+                elif isinstance(session_value, dict) and "applications" in session_value:
+                    # 新格式：包含applications键
+                    fixed_data[session_name] = session_value
                 else:
-                    logging.warning(f"会话 '{k}' 的数据不是列表，已自动忽略。")
-            if not fixed:
-                fixed = {self.default_session_name: []}
-            return fixed
+                    logger.warning(f"会话 '{session_name}' 的数据格式无效，已跳过")
+            
+            # 如果没有有效会话，创建默认会话
+            if not fixed_data:
+                logger.warning("没有找到有效会话，创建默认会话")
+                fixed_data[self.default_session_name] = {"applications": []}
+            
+            return fixed_data
         except Exception as e:
-            logging.error(f"加载会话数据失败: {e}")
-            return {self.default_session_name: []}
+            logger.error(f"加载会话数据失败: {e}")
+            return {self.default_session_name: {"applications": []}}
 
     def save_sessions(self):
+        """保存会话数据"""
+        # 创建备份
         if self.backup and os.path.exists(self.session_file):
-            shutil.copyfile(self.session_file, self.session_file + ".bak")
+            backup_file = f"{self.session_file}.bak"
+            try:
+                shutil.copyfile(self.session_file, backup_file)
+                logger.info(f"已创建会话数据备份: {backup_file}")
+            except Exception as e:
+                logger.warning(f"创建会话数据备份失败: {e}")
+        
+        # 确保会话数据格式正确
+        fixed_sessions = {}
+        for name, data in self.sessions.items():
+            if isinstance(data, dict) and "applications" in data:
+                fixed_sessions[name] = data
+            elif isinstance(data, list):
+                # 转换旧格式
+                fixed_sessions[name] = {"applications": data}
+            else:
+                logger.warning(f"跳过保存格式无效的会话: {name}")
+        
+        # 保存会话数据
         try:
+            os.makedirs(os.path.dirname(self.session_file) or '.', exist_ok=True)
             with open(self.session_file, 'w', encoding='utf-8') as f:
-                json.dump(self.sessions, f, ensure_ascii=False, indent=4)
+                json.dump(fixed_sessions, f, ensure_ascii=False, indent=4)
+            logger.info(f"会话数据已保存到: {self.session_file}")
             return True
         except Exception as e:
-            logging.error(f"保存会话数据失败: {e}")
+            logger.error(f"保存会话数据失败: {e}")
             return False
 
     def get_session_names(self):
         return list(self.sessions.keys())
 
     def get_session(self, name):
-        return self.sessions.get(name, [])
+        """获取会话数据，确保返回正确格式"""
+        if name not in self.sessions:
+            return {"applications": []}
+        
+        session_data = self.sessions[name]
+        if isinstance(session_data, dict) and "applications" in session_data:
+            return session_data
+        elif isinstance(session_data, list):
+            # 转换旧格式
+            return {"applications": session_data}
+        else:
+            logger.warning(f"会话 '{name}' 的数据格式无效，返回空会话")
+            return {"applications": []}
 
     def set_session(self, name, items):
-        self.sessions[name] = items
+        """设置会话数据，确保格式正确"""
+        if isinstance(items, dict) and "applications" in items:
+            self.sessions[name] = items
+        elif isinstance(items, list):
+            # 转换为新格式
+            self.sessions[name] = {"applications": items}
+        else:
+            logger.warning(f"尝试设置无效格式的会话数据: {name}")
+            self.sessions[name] = {"applications": []}
+        
         return self.save_sessions()
 
     def delete_session(self, name):
@@ -465,7 +505,7 @@ class SessionManager:
 
     def clear_session(self, name):
         if name in self.sessions:
-            self.sessions[name] = []
+            self.sessions[name] = {"applications": []}
             return self.save_sessions()
         return False
 
