@@ -1,6 +1,9 @@
 # Python 缓存
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
 
 # 构建产物
 dist/
@@ -12,25 +15,49 @@ build/
 *.toc
 *.zip
 *.html
-*.txt
+*.spec
 
 # 日志和本地配置
 resources/session_manager.log
 resources/config.json
+*.log
 
 # 会话数据文件
 session_manager/sessions.json
 *.json.bak
+session_manager/__pycache__/
 
 # IDE/编辑器相关
 .vscode/
 .idea/
 *.swp
+*.swo
+.vs/
+*.suo
+*.user
 
 # 测试数据
 /tests/*.json
 /tests/*.bak
+test_*.py
+test_*.bat
+*_test.py
+
+# 临时文件
+temp/
+tmp/
+.temp/
+.tmp/
+
+# 浏览器扩展开发相关
+node_modules/
+package-lock.json
+
+# 本地启动脚本
+start_*.bat
+start_*.sh
 
 # 其他
 .DS_Store
-Thumbs.db 
+Thumbs.db
+desktop.ini 
