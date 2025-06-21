@@ -19,6 +19,7 @@ docs/
 ├── FAQ.md            # 常见问题解答
 ├── CHANGELOG.md      # 版本更新日志
 ├── DEVELOPER.md      # 开发者文档
+└── user_guide.md     # 用户指南
 ```
 
 ## 文档维护建议
@@ -154,10 +155,29 @@ windows-session-manager/
 │   ├── INSTALL.md
 │   ├── USAGE.md
 │   ├── FAQ.md
-│   └── CHANGELOG.md
+│   ├── CHANGELOG.md
+│   └── DEVELOPER.md
 ├── config.json                 # 默认配置文件
 ├── requirements.txt            # 依赖包列表
 ├── setup.py                    # （可选）打包/安装脚本
 ├── LICENSE
 └── .gitignore
 ```
+
+## 最新功能
+
+### 混合标签页采集方法
+
+Windows会话管理器现在支持混合标签页采集方法，结合了WebSocket实时数据和静态文件提取两种技术，提供更准确、更可靠的浏览器标签页信息。详细信息请参阅[用户指南的混合标签页采集方法章节](user_guide.md#混合标签页采集方法)。
+
+### 选择性恢复功能
+
+选择性恢复是一项智能功能，它可以自动检测已存在的窗口，并只恢复不存在的窗口。这避免了重复打开已有窗口的问题，提高了会话恢复的效率和用户体验。详细信息请参阅[用户指南的选择性恢复功能章节](user_guide.md#选择性恢复功能)。
+
+### 浏览器标签页支持
+
+Windows会话管理器支持完整的浏览器标签页管理功能，包括保存和恢复Chrome、Edge、Firefox、Brave和Opera等主流浏览器的标签页。详细信息请参阅[用户指南的浏览器标签页支持章节](user_guide.md#浏览器标签页支持)。
+
+## 贡献文档
+
+如果您发现文档中有任何错误或者想要改进文档，欢迎提交Pull Request或者Issue。
