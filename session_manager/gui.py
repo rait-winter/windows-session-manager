@@ -201,7 +201,7 @@ class SessionManagerApp:
         
         # 添加双击事件处理
         self.window_listbox.bind("<Double-1>", self.on_item_double_click)
-
+        
         # 操作按钮区
         btn_frame = ttk.Frame(main_frame)
         btn_frame.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
@@ -212,13 +212,13 @@ class SessionManagerApp:
         ttk.Button(btn_frame, text="重命名", command=self.rename_session).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="删除", command=self.delete_session).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="清空", command=self.clear_session).pack(side="left", padx=5)
-
+        
         # 日志输出区
         log_frame = ttk.LabelFrame(root, text="日志输出", padding="10")
         log_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=(0, 10))
         self.log_text = scrolledtext.ScrolledText(log_frame, state='disabled', height=6, wrap=tk.WORD, font=('微软雅黑', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
-
+        
         # 状态栏和退出按钮区域
         bottom_frame = ttk.Frame(root)
         bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
@@ -769,58 +769,67 @@ class SessionManagerApp:
         return self.session_manager.get_session(session_name)
 
     def refresh_window_list(self):
-        """刷新窗口列表"""
+        """刷新窗口列表，支持浏览器窗口下显示所有标签页"""
         if not self.current_session_name:
             return
-            
         # 清空列表
         for i in self.window_listbox.get_children():
             self.window_listbox.delete(i)
-            
         # 获取当前会话数据
         session_data = self.get_session_data(self.current_session_name)
         if not session_data:
             self.log_to_gui("会话数据为空")
             return
-            
         # 获取应用程序列表
         applications = []
-        
-        # 处理不同的数据格式
         if isinstance(session_data, dict) and "applications" in session_data:
-            # 新格式：包含applications键
             applications = session_data.get("applications", [])
         elif isinstance(session_data, list):
-            # 旧格式：直接是列表
             applications = session_data
         else:
             self.log_to_gui(f"警告：会话数据格式无效（类型：{type(session_data)}），已跳过。")
             return
-        
-        # 添加应用到列表
+        # 合并browser_windows到树形结构
+        browser_windows = session_data.get("browser_windows", [])
+        for bw in browser_windows:
+            # 插入浏览器窗口为父节点
+            title = f"[浏览器] {bw.get('title', '')}（{len(bw.get('tabs', []))}个标签页）"
+            parent_id = self.window_listbox.insert(
+                "", "end",
+                text=title,
+                values=("browser", bw.get("browser", "")),
+                image=self.get_icon_for_type("browser")
+            )
+            # 插入所有标签页为子节点
+            for tab in bw.get("tabs", []):
+                tab_title = tab.get("title", tab.get("url", ""))
+                tab_url = tab.get("url", "")
+                self.window_listbox.insert(
+                    parent_id, "end",
+                    text=tab_title,
+                    values=("tab", tab_url),
+                    image=self.get_icon_for_type("tab")
+                )
+        # 添加普通应用到列表
         for app_info in applications:
             if not isinstance(app_info, dict):
                 self.log_to_gui(f"警告：应用数据无效（类型：{type(app_info)}），已跳过。")
                 continue
-                
-            # 获取应用信息
             window_title = app_info.get("title", "未知应用")
             window_path = app_info.get("path") or app_info.get("process_path", "")
-            
-            # 确定应用类型
             if app_info.get("is_browser", False):
-                window_type = "browser"
+                continue  # 已在browser_windows中展示
             elif app_info.get("special_app", False):
                 window_type = "special"
             else:
                 window_type = "application"
-            
-            # 添加应用条目
             app_icon = self.get_icon_for_type(window_type)
-            self.window_listbox.insert("", "end", 
-                               text=window_title, 
-                               values=(window_type, window_path),
-                               image=app_icon)
+            self.window_listbox.insert(
+                "", "end",
+                text=window_title,
+                values=(window_type, window_path),
+                image=app_icon
+            )
 
     def get_icon_for_type(self, item_type):
         """根据项目类型获取图标"""

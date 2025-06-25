@@ -18,6 +18,7 @@ import win32con
 import win32process
 import win32api
 import psutil
+from session_manager.browser_tabs import collect_all_browser_tabs
 
 # 禁用浏览器标签页支持
 BROWSER_TABS_SUPPORT = False
@@ -149,6 +150,14 @@ def collect_session_data(config):
             session_data["applications"].append(app_data)
             logger.info(f"保存后台特殊应用: {app_data['title']} (PID: {info['pid']}, 路径: {info['path']})")
     
+    # 集成浏览器窗口及标签页采集
+    try:
+        browser_windows = collect_all_browser_tabs()
+        session_data["browser_windows"] = browser_windows
+        logger.info(f"另外，收集到 {len(browser_windows)} 个浏览器窗口。")
+    except Exception as e:
+        logger.warning(f"浏览器标签页模块不可用: {e}")
+
     logger.info(f"会话数据收集完成。共收集到 {len(session_data['applications'])} 个相关窗口/应用条目。")
     return session_data
 
