@@ -1,6 +1,7 @@
 """
 browser_tabs.py
 浏览器标签页处理模块，负责获取和恢复浏览器标签页。
+优化版本 - 优先使用DevTools协议，增强错误处理
 """
 
 import os
@@ -18,47 +19,65 @@ from difflib import SequenceMatcher
 import logging
 import subprocess
 import socket
+import time
+import threading
 
 logger = logging.getLogger(__name__)
 
-# 浏览器配置信息
+# 浏览器配置信息 - 优化路径检测
 BROWSER_PROFILES = {
     "chrome.exe": {
         "name": "Google Chrome",
-        "data_path": os.path.join(os.environ["LOCALAPPDATA"], "Google", "Chrome", "User Data"),
+        "data_paths": [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data"),
+            os.path.join(os.environ.get("APPDATA", ""), "Google", "Chrome", "User Data"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Local", "Google", "Chrome", "User Data")
+        ],
         "default_profile": "Default",
         "history_db": "History",
         "bookmarks_file": "Bookmarks",
         "current_tabs_file": "Current Tabs",
         "current_session_file": "Current Session",
         "local_state_file": "Local State",
-        "command_line_args": "--restore-last-session"
+        "command_line_args": "--restore-last-session --remote-debugging-port=9222"
     },
     "msedge.exe": {
         "name": "Microsoft Edge",
-        "data_path": os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "Edge", "User Data"),
+        "data_paths": [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data"),
+            os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Edge", "User Data"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Local", "Microsoft", "Edge", "User Data")
+        ],
         "default_profile": "Default",
         "history_db": "History",
         "bookmarks_file": "Bookmarks",
         "current_tabs_file": "Current Tabs",
         "current_session_file": "Current Session",
         "local_state_file": "Local State",
-        "command_line_args": "--restore-last-session"
+        "command_line_args": "--restore-last-session --remote-debugging-port=9223"
     },
     "brave.exe": {
         "name": "Brave Browser",
-        "data_path": os.path.join(os.environ["LOCALAPPDATA"], "BraveSoftware", "Brave-Browser", "User Data"),
+        "data_paths": [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "BraveSoftware", "Brave-Browser", "User Data"),
+            os.path.join(os.environ.get("APPDATA", ""), "BraveSoftware", "Brave-Browser", "User Data"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Local", "BraveSoftware", "Brave-Browser", "User Data")
+        ],
         "default_profile": "Default",
         "history_db": "History",
         "bookmarks_file": "Bookmarks",
         "current_tabs_file": "Current Tabs",
         "current_session_file": "Current Session",
         "local_state_file": "Local State",
-        "command_line_args": "--restore-last-session"
+        "command_line_args": "--restore-last-session --remote-debugging-port=9224"
     },
     "opera.exe": {
         "name": "Opera",
-        "data_path": os.path.join(os.environ["APPDATA"], "Opera Software", "Opera Stable"),
+        "data_paths": [
+            os.path.join(os.environ.get("APPDATA", ""), "Opera Software", "Opera Stable"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Opera Software", "Opera Stable"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Roaming", "Opera Software", "Opera Stable")
+        ],
         "default_profile": None,
         "history_db": "History",
         "bookmarks_file": "Bookmarks",
@@ -69,142 +88,331 @@ BROWSER_PROFILES = {
     },
     "firefox.exe": {
         "name": "Mozilla Firefox",
-        "data_path": os.path.join(os.environ["APPDATA"], "Mozilla", "Firefox", "Profiles"),
+        "data_paths": [
+            os.path.join(os.environ.get("APPDATA", ""), "Mozilla", "Firefox", "Profiles"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Mozilla", "Firefox", "Profiles"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Roaming", "Mozilla", "Firefox", "Profiles")
+        ]
     }
 }
 
-def get_chromium_tabs_by_devtools(window_title):
-    print(f"[调试] 尝试用DevTools协议采集: {window_title}")
-    for port in [9222, 9223, 9224]:
+def get_valid_data_path(browser_exe):
+    """获取有效的浏览器数据路径"""
+    if browser_exe not in BROWSER_PROFILES:
+        return None
+    
+    info = BROWSER_PROFILES[browser_exe]
+    for path in info.get("data_paths", []):
+        if os.path.exists(path):
+            logger.info(f"找到{browser_exe}数据路径: {path}")
+            return path
+    
+    logger.warning(f"未找到{browser_exe}的有效数据路径")
+    return None
+
+def is_devtools_available(port):
+    """检查DevTools端口是否可用"""
+    try:
+        response = requests.get(f"http://127.0.0.1:{port}/json", timeout=1)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_chromium_tabs_by_devtools(window_title, browser_exe):
+    """使用DevTools协议获取Chromium浏览器标签页"""
+    logger.info(f"尝试使用DevTools协议采集: {window_title} ({browser_exe})")
+    
+    # 根据浏览器类型确定端口
+    port_mapping = {
+        "chrome.exe": 9222,
+        "msedge.exe": 9223,
+        "brave.exe": 9224
+    }
+    
+    ports = [port_mapping.get(browser_exe, 9222)]
+    # 如果主端口不可用，尝试其他端口
+    if not is_devtools_available(ports[0]):
+        ports.extend([9222, 9223, 9224, 9225, 9226])
+    
+    for port in ports:
         try:
-            resp = requests.get(f"http://127.0.0.1:{port}/json", timeout=0.5)
-            all_tabs = resp.json()
-            window_id = None
+            logger.debug(f"尝试连接DevTools端口: {port}")
+            response = requests.get(f"http://127.0.0.1:{port}/json", timeout=2)
+            if response.status_code != 200:
+                continue
+                
+            all_tabs = response.json()
+            if not all_tabs:
+                continue
+                
+            # 查找匹配的窗口
+            target_window_id = None
+            best_match_score = 0
+            
             for tab in all_tabs:
-                if tab.get('title') == window_title or (tab.get('title') and tab.get('title') in window_title):
-                    window_id = tab.get('windowId')
-                    break
-            if window_id is None and all_tabs:
-                window_id = all_tabs[0].get('windowId')
-            tabs = [
-                {"title": t.get("title", ""), "url": t.get("url", "")}
-                for t in all_tabs if t.get("windowId") == window_id
-            ]
-            print(f"[调试] DevTools端口{port}采集到{len(tabs)}个标签页")
-            if tabs:
-                return tabs
-        except Exception as e:
-            print(f"[调试] DevTools端口{port}采集失败: {e}")
+                tab_title = tab.get('title', '')
+                if tab_title:
+                    # 计算标题匹配度
+                    similarity = SequenceMatcher(None, tab_title.lower(), window_title.lower()).ratio()
+                    if similarity > best_match_score and similarity > 0.3:
+                        best_match_score = similarity
+                        target_window_id = tab.get('windowId')
+            
+            # 如果没找到匹配的窗口，使用第一个窗口
+            if target_window_id is None and all_tabs:
+                target_window_id = all_tabs[0].get('windowId')
+            
+            if target_window_id is not None:
+                tabs = []
+                for tab in all_tabs:
+                    if tab.get('windowId') == target_window_id:
+                        url = tab.get('url', '')
+                        title = tab.get('title', '')
+                        
+                        # 过滤无效URL
+                        if url and not url.startswith('chrome://') and not url.startswith('about:'):
+                            tabs.append({
+                                "title": title or url,
+                                "url": url,
+                                "source": "devtools"
+                            })
+                
+                if tabs:
+                    logger.info(f"DevTools端口{port}成功采集到{len(tabs)}个标签页")
+                    return tabs
+                    
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"DevTools端口{port}连接失败: {e}")
             continue
-    print("[调试] DevTools协议采集失败")
+        except Exception as e:
+            logger.error(f"DevTools端口{port}处理异常: {e}")
+            continue
+    
+    logger.warning("DevTools协议采集失败")
     return None
 
 def get_chromium_tabs_by_session(browser_exe, window_title):
-    print(f"[调试] 尝试用Session/历史兜底采集: {window_title} ({browser_exe})")
+    """使用Session文件获取Chromium浏览器标签页（兜底方案）"""
+    logger.info(f"尝试使用Session文件采集: {window_title} ({browser_exe})")
+    
+    data_path = get_valid_data_path(browser_exe)
+    if not data_path:
+        logger.error(f"未找到{browser_exe}的数据路径")
+        return None
+    
     info = BROWSER_PROFILES[browser_exe]
-    user_data_dir = info["data_path"]
     profiles = ["Default"]
-    local_state_path = os.path.join(user_data_dir, "Local State")
+    
+    # 读取Local State获取所有配置文件
+    local_state_path = os.path.join(data_path, "Local State")
     if os.path.exists(local_state_path):
-        with open(local_state_path, 'r', encoding='utf-8') as f:
-            try:
+        try:
+            with open(local_state_path, 'r', encoding='utf-8') as f:
                 local_state = json.load(f)
                 profile_info = local_state.get("profile", {}).get("info_cache", {})
                 for profile_name in profile_info.keys():
-                    if profile_name != "Default" and os.path.exists(os.path.join(user_data_dir, profile_name)):
+                    if profile_name != "Default" and os.path.exists(os.path.join(data_path, profile_name)):
                         profiles.append(profile_name)
-            except Exception as e:
-                print(f"[调试] 解析Local State失败: {e}")
-    tabs = []
+        except Exception as e:
+            logger.error(f"解析Local State失败: {e}")
+    
+    all_tabs = []
     for profile in profiles:
-        history_db = os.path.join(user_data_dir, profile, info["history_db"])
-        if os.path.exists(history_db):
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as temp_file:
-                temp_db_path = temp_file.name
+        profile_path = os.path.join(data_path, profile)
+        
+        # 尝试从Session文件获取标签页
+        session_files = [
+            os.path.join(profile_path, "Current Session"),
+            os.path.join(profile_path, "Current Tabs"),
+            os.path.join(profile_path, "Last Session"),
+            os.path.join(profile_path, "Last Tabs")
+        ]
+        
+        for session_file in session_files:
+            if os.path.exists(session_file):
+                try:
+                    tabs = extract_tabs_from_session_files(info, session_file)
+                    if tabs:
+                        all_tabs.extend(tabs)
+                        logger.info(f"从{session_file}采集到{len(tabs)}个标签页")
+                except Exception as e:
+                    logger.error(f"读取Session文件失败 {session_file}: {e}")
+        
+        # 如果Session文件没有数据，从历史记录获取
+        if not all_tabs:
             try:
-                shutil.copy2(history_db, temp_db_path)
-                conn = sqlite3.connect(temp_db_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT url, title FROM urls ORDER BY last_visit_time DESC LIMIT 20")
-                for url, title in cursor.fetchall():
-                    tabs.append({"title": title or url, "url": url})
-                conn.close()
-                print(f"[调试] {profile}历史采集到{len(tabs)}个标签页")
+                tabs = extract_tabs_from_history(info, profile_path)
+                if tabs:
+                    all_tabs.extend(tabs)
+                    logger.info(f"从{profile}历史记录采集到{len(tabs)}个标签页")
             except Exception as e:
-                print(f"[调试] 读取历史数据库失败: {e}")
-            finally:
-                try: os.unlink(temp_db_path)
-                except: pass
-    if not tabs:
-        print("[调试] Session/历史兜底采集失败，返回新标签页")
-        tabs = [{"title": "新标签页", "url": "about:newtab"}]
-    return tabs
+                logger.error(f"读取历史记录失败 {profile}: {e}")
+    
+    # 去重并限制数量
+    unique_tabs = []
+    seen_urls = set()
+    for tab in all_tabs:
+        if tab.get('url') and tab['url'] not in seen_urls:
+            seen_urls.add(tab['url'])
+            unique_tabs.append(tab)
+            if len(unique_tabs) >= 20:  # 限制最多20个标签页
+                break
+    
+    if unique_tabs:
+        logger.info(f"Session/历史采集成功，共{len(unique_tabs)}个标签页")
+        return unique_tabs
+    
+    logger.warning("Session/历史采集失败，返回默认标签页")
+    return [{"title": "新标签页", "url": "about:newtab", "source": "default"}]
 
 def get_firefox_tabs(window_title):
-    print(f"[调试] 尝试采集Firefox标签页: {window_title}")
-    profiles_path = BROWSER_PROFILES["firefox.exe"]["data_path"]
-    profile_dir = None
-    for item in os.listdir(profiles_path):
-        if item.endswith('.default') or item.endswith('.default-release'):
-            profile_dir = os.path.join(profiles_path, item)
+    """获取Firefox浏览器标签页"""
+    logger.info(f"尝试采集Firefox标签页: {window_title}")
+    
+    # 获取有效的Firefox数据路径
+    data_paths = BROWSER_PROFILES["firefox.exe"]["data_paths"]
+    profiles_path = None
+    
+    for path in data_paths:
+        if os.path.exists(path):
+            profiles_path = path
+            logger.info(f"找到Firefox profiles路径: {path}")
             break
+    
+    if not profiles_path:
+        logger.error("未找到Firefox profiles目录")
+        return [{"title": "新标签页", "url": "about:newtab", "source": "default"}]
+    
+    # 查找配置文件目录
+    profile_dir = None
+    profile_candidates = []
+    
+    try:
+        for item in os.listdir(profiles_path):
+            item_path = os.path.join(profiles_path, item)
+            if os.path.isdir(item_path):
+                if item.endswith('.default') or item.endswith('.default-release'):
+                    profile_candidates.append((item_path, 1))  # 优先级1
+                else:
+                    profile_candidates.append((item_path, 0))  # 优先级0
+        
+        # 按优先级排序
+        profile_candidates.sort(key=lambda x: x[1], reverse=True)
+        
+        if profile_candidates:
+            profile_dir = profile_candidates[0][0]
+            logger.info(f"选择Firefox profile: {os.path.basename(profile_dir)}")
+        
+    except Exception as e:
+        logger.error(f"查找Firefox profile失败: {e}")
+    
     if not profile_dir:
-        dirs = [d for d in os.listdir(profiles_path) if os.path.isdir(os.path.join(profiles_path, d))]
-        if dirs:
-            profile_dir = os.path.join(profiles_path, dirs[0])
-    if not profile_dir:
-        print("[调试] 未找到Firefox profile目录")
-        return [{"title": "新标签页", "url": "about:newtab"}]
+        logger.error("未找到Firefox profile目录")
+        return [{"title": "新标签页", "url": "about:newtab", "source": "default"}]
+    
+    # 方法1: 从sessionstore.jsonlz4获取当前会话
     session_file = os.path.join(profile_dir, "sessionstore.jsonlz4")
     if os.path.exists(session_file):
         try:
             with open(session_file, "rb") as f:
-                f.read(8)
+                f.read(8)  # 跳过LZ4头部
                 data = lz4.block.decompress(f.read())
                 session_data = json.loads(data.decode("utf-8"))
+                
                 best_score = 0
                 best_tabs = []
+                
                 for win in session_data.get("windows", []):
-                    win_title = None
+                    # 提取窗口标题
+                    win_title = ""
                     if win.get("tabs"):
                         entries = win["tabs"][0].get("entries", [])
                         if entries:
                             win_title = entries[-1].get("title", "")
-                    score = 1 if win_title and win_title in window_title else 0
-                    if score > best_score:
-                        best_score = score
-                        tabs = []
-                        for tab in win.get("tabs", []):
-                            idx = tab.get("index", 1) - 1
-                            entries = tab.get("entries", [])
-                            if entries and 0 <= idx < len(entries):
-                                entry = entries[idx]
-                                url = entry.get("url", "")
-                                title = entry.get("title", url)
-                                tabs.append({"title": title, "url": url})
-                        best_tabs = tabs
+                    
+                    # 计算窗口标题匹配度
+                    if win_title:
+                        similarity = calculate_similarity(win_title, window_title)
+                        if similarity > best_score:
+                            best_score = similarity
+                            tabs = []
+                            for tab in win.get("tabs", []):
+                                idx = tab.get("index", 1) - 1
+                                entries = tab.get("entries", [])
+                                if entries and 0 <= idx < len(entries):
+                                    entry = entries[idx]
+                                    url = entry.get("url", "")
+                                    title = entry.get("title", url)
+                                    
+                                    # 过滤无效URL
+                                    if url and not url.startswith('about:') and not url.startswith('chrome:'):
+                                        tabs.append({
+                                            "title": title,
+                                            "url": url,
+                                            "source": "sessionstore"
+                                        })
+                            best_tabs = tabs
+                
                 if best_tabs:
-                    print(f"[调试] sessionstore.jsonlz4采集到{len(best_tabs)}个标签页")
+                    logger.info(f"从sessionstore.jsonlz4采集到{len(best_tabs)}个标签页")
                     return best_tabs
+                    
         except Exception as e:
-            print(f"[调试] 解析sessionstore.jsonlz4失败: {e}")
+            logger.error(f"解析sessionstore.jsonlz4失败: {e}")
+    
+    # 方法2: 从places.sqlite获取历史记录
     places_file = os.path.join(profile_dir, 'places.sqlite')
-    tabs = []
     if os.path.exists(places_file):
         try:
-            conn = sqlite3.connect(places_file)
-            cur = conn.cursor()
-            cur.execute("SELECT title, url FROM moz_places WHERE url LIKE 'http%' ORDER BY last_visit_date DESC LIMIT 20")
-            for row in cur.fetchall():
-                tabs.append({'title': row[0] or row[1], 'url': row[1]})
-            conn.close()
-            print(f"[调试] places.sqlite采集到{len(tabs)}个标签页")
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as temp_file:
+                temp_db_path = temp_file.name
+            
+            try:
+                shutil.copy2(places_file, temp_db_path)
+                conn = sqlite3.connect(temp_db_path)
+                cursor = conn.cursor()
+                
+                # 获取最近的访问记录
+                cursor.execute("""
+                    SELECT title, url, last_visit_date 
+                    FROM moz_places 
+                    WHERE url LIKE 'http%' 
+                    AND last_visit_date IS NOT NULL
+                    ORDER BY last_visit_date DESC 
+                    LIMIT 30
+                """)
+                
+                tabs = []
+                for row in cursor.fetchall():
+                    title, url, visit_date = row
+                    if url and not url.startswith('about:') and not url.startswith('chrome:'):
+                        tabs.append({
+                            'title': title or url,
+                            'url': url,
+                            'source': 'history',
+                            'visit_date': visit_date
+                        })
+                
+                conn.close()
+                logger.info(f"从places.sqlite采集到{len(tabs)}个标签页")
+                
+                if tabs:
+                    return tabs
+                    
+            except Exception as e:
+                logger.error(f"读取places.sqlite失败: {e}")
+            finally:
+                try:
+                    os.unlink(temp_db_path)
+                except:
+                    pass
+                    
         except Exception as e:
-            print(f"[调试] 读取places.sqlite失败: {e}")
-    if not tabs:
-        print("[调试] Firefox采集失败，返回新标签页")
-        tabs = [{"title": "新标签页", "url": "about:newtab"}]
-    return tabs
+            logger.error(f"复制places.sqlite失败: {e}")
+    
+    # 方法3: 如果都失败了，返回默认标签页
+    logger.warning("Firefox采集失败，返回默认标签页")
+    return [{"title": "新标签页", "url": "about:newtab", "source": "fallback"}]
 
 def collect_all_browser_tabs():
     """仅通过session文件和历史数据库采集标签页，并按窗口标题与tab标题相似度分配"""
@@ -229,7 +437,7 @@ def collect_all_browser_tabs():
     # 采集所有profile下的tabs
     def get_chromium_all_tabs(browser_exe):
         info = BROWSER_PROFILES[browser_exe]
-        user_data_dir = info["data_path"]
+        user_data_dir = info["data_paths"][0]
         tabs = []
         # 遍历所有profile
         profiles = ["Default"]
@@ -308,8 +516,8 @@ def collect_all_browser_tabs():
                 "tabs": best_tabs
             })
     # Firefox sessionstore.jsonlz4分组
-    if os.path.exists(BROWSER_PROFILES["firefox.exe"]["data_path"]):
-        profiles_path = BROWSER_PROFILES["firefox.exe"]["data_path"]
+    if os.path.exists(BROWSER_PROFILES["firefox.exe"]["data_paths"][0]):
+        profiles_path = BROWSER_PROFILES["firefox.exe"]["data_paths"][0]
         for item in os.listdir(profiles_path):
             if item.endswith('.default') or item.endswith('.default-release'):
                 profile_dir = os.path.join(profiles_path, item)
@@ -461,7 +669,7 @@ def get_chromium_tabs(browser_exe, browser_pid):
     
     try:
         # 获取所有用户配置文件目录
-        user_data_dir = browser_info["data_path"]
+        user_data_dir = browser_info["data_paths"][0]
         profiles = get_chromium_profiles(user_data_dir)
         
         for profile_name in profiles:
@@ -837,7 +1045,7 @@ def get_opera_tabs(browser_pid):
 
 def find_firefox_profile_dir():
     """查找Firefox的配置文件目录"""
-    profiles_path = BROWSER_PROFILES["firefox.exe"]["data_path"]
+    profiles_path = BROWSER_PROFILES["firefox.exe"]["data_paths"][0]
     
     try:
         if not os.path.exists(profiles_path):
@@ -1254,7 +1462,6 @@ def restore_using_html_method(browser_path, urls):
                 logger.debug(f"删除临时文件失败: {e}")
         
         # 在后台线程中删除临时文件
-        import threading
         threading.Thread(target=delete_temp_file, daemon=True).start()
         
         return True
@@ -1398,7 +1605,6 @@ def restore_using_javascript(browser_path, urls):
                 pass
         
         # 在后台线程中删除临时文件
-        import threading
         threading.Thread(target=delete_temp_file, daemon=True).start()
         
         return True
@@ -1461,204 +1667,27 @@ def restore_opera_window(browser_path, urls):
         return False
 
 def get_chromium_tabs_for_window(browser_exe, browser_pid, window_title, window_hwnd=None):
-    """获取特定窗口的Chromium标签页"""
-    # 从常规历史记录获取标签页列表
-    all_tabs = get_chromium_tabs(browser_exe, browser_pid)
+    """
+    获取Chromium浏览器特定窗口的标签页
+    优化版本：优先使用DevTools协议，兜底使用Session/历史记录
+    """
+    logger.info(f"开始获取Chromium标签页: {browser_exe}, 窗口: {window_title}")
     
-    if not all_tabs:
-        logger.warning(f"未找到任何标签页数据 (浏览器: {browser_exe}, PID: {browser_pid})")
-        return []
-        
-    logger.info(f"共获取到 {len(all_tabs)} 个标签页，开始匹配窗口 '{window_title}'")
+    # 方法1: 优先使用DevTools协议
+    tabs = get_chromium_tabs_by_devtools(window_title, browser_exe)
+    if tabs:
+        logger.info(f"DevTools协议成功获取{len(tabs)}个标签页")
+        return tabs
     
-    # 使用窗口句柄获取窗口的Z顺序（前台/后台）
-    window_z_order = 0
-    if window_hwnd:
-        try:
-            # 获取所有同类型浏览器窗口的Z顺序
-            browser_windows = []
-            for window in gw.getAllWindows():
-                try:
-                    if not window.title or window.title == "":
-                        continue
-                        
-                    _, pid = win32process.GetWindowThreadProcessId(window._hWnd)
-                    proc = psutil.Process(pid)
-                    if os.path.basename(proc.exe()).lower() == browser_exe:
-                        browser_windows.append((window._hWnd, window.title))
-                except Exception as e:
-                    logger.debug(f"获取窗口信息时出错: {e}")
-                    continue
-            
-            # 根据Z顺序排序
-            browser_windows.sort(key=lambda w: win32gui.GetWindowRect(w[0])[1])  # 按Y坐标排序，近似Z顺序
-            
-            # 找出当前窗口的Z顺序索引
-            window_indices = [i for i, (hwnd, _) in enumerate(browser_windows) if hwnd == window_hwnd]
-            if window_indices:
-                window_z_order = window_indices[0]
-                logger.debug(f"窗口 '{window_title}' Z顺序: {window_z_order+1}/{len(browser_windows)}")
-            
-            # 记录所有浏览器窗口标题，用于调试
-            logger.debug(f"浏览器窗口列表: {[title for _, title in browser_windows]}")
-        except Exception as e:
-            logger.debug(f"获取窗口Z顺序时出错: {e}")
+    # 方法2: 使用Session文件和历史记录（兜底方案）
+    tabs = get_chromium_tabs_by_session(browser_exe, window_title)
+    if tabs:
+        logger.info(f"Session/历史记录成功获取{len(tabs)}个标签页")
+        return tabs
     
-    # 处理窗口标题，移除浏览器后缀
-    clean_window_title = window_title
-    for suffix in [" - Google Chrome", " - Microsoft Edge", " - Brave", " - Firefox", " - Opera"]:
-        if clean_window_title.endswith(suffix):
-            clean_window_title = clean_window_title[:-len(suffix)]
-            break
-    
-    # 提取窗口标题中的关键词
-    window_keywords = extract_keywords(clean_window_title)
-    logger.debug(f"窗口关键词: {window_keywords}")
-    
-    # 记录已找到的标签页
-    relevant_tabs = []
-    
-    # 首先尝试找到与窗口标题最匹配的标签页（通常是当前活动标签页）
-    best_match_tab = None
-    best_match_score = 0
-    
-    for tab in all_tabs:
-        tab_title = tab.get("title", "")
-        
-        # 使用多种匹配方法
-        title_score = calculate_similarity(tab_title, clean_window_title)
-        keyword_score = 0
-        
-        # 关键词匹配
-        if window_keywords:
-            matched_keywords = 0
-            for keyword in window_keywords:
-                if keyword.lower() in tab_title.lower():
-                    matched_keywords += 1
-            if matched_keywords and len(window_keywords) > 0:
-                keyword_score = matched_keywords / len(window_keywords)
-        
-        # 组合得分
-        score = max(title_score, keyword_score * 0.9)  # 稍微偏向直接标题匹配
-        
-        if score > best_match_score:
-            best_match_score = score
-            best_match_tab = tab
-    
-    # 如果找到最佳匹配，将其放在结果列表的首位
-    if best_match_tab and best_match_score > 0.5:
-        logger.debug(f"找到最佳匹配标签页: {best_match_tab.get('title', '')[:30]}... (得分: {best_match_score:.2f})")
-        relevant_tabs.append(best_match_tab)
-        
-        # 记录用于匹配其他标签页的信息
-        best_tab_index = all_tabs.index(best_match_tab)
-        best_domain = extract_domain(best_match_tab.get("url", ""))
-        
-        # 为剩余标签页评分
-        tab_scores = []
-        for i, tab in enumerate(all_tabs):
-            if tab == best_match_tab:
-                continue
-                
-            score = 0
-            
-            # 域名相似性得分
-            tab_domain = extract_domain(tab.get("url", ""))
-            if tab_domain == best_domain and best_domain:
-                score += 3  # 相同域名加高分
-            elif tab_domain and best_domain and (tab_domain in best_domain or best_domain in tab_domain):
-                score += 1  # 部分匹配域名加低分
-            
-            # 位置接近度得分（时间接近度的近似）
-            position_diff = abs(i - best_tab_index)
-            if position_diff <= 3:
-                score += 3  # 非常接近
-            elif position_diff <= 7:
-                score += 2  # 较接近
-            elif position_diff <= 15:
-                score += 1  # 一般接近
-            
-            # 标题关键词匹配
-            if window_keywords:
-                tab_title = tab.get("title", "").lower()
-                for keyword in window_keywords:
-                    if keyword.lower() in tab_title:
-                        score += 2  # 每匹配一个关键词加分
-            
-            # Z顺序影响（前台窗口的标签页可能在列表前部，后台窗口的标签页可能在后部）
-            if window_z_order == 0:  # 前台窗口
-                if i < len(all_tabs) // 2:  # 在列表前半部分
-                    score += 1
-            else:  # 后台窗口
-                if i >= len(all_tabs) // 2:  # 在列表后半部分
-                    score += 1
-            
-            # 保存标签页和得分
-            tab_scores.append((tab, score))
-        
-        # 按得分排序
-        tab_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        # 添加得分较高的标签页（得分至少为3）
-        added_count = 0
-        for tab, score in tab_scores:
-            if score >= 3 and tab not in relevant_tabs:
-                relevant_tabs.append(tab)
-                added_count += 1
-                logger.debug(f"添加相关标签页: {tab.get('title', '')[:30]}... (得分: {score})")
-                
-                # 限制添加的相关标签页数量，避免将所有标签页都添加到同一窗口
-                if added_count >= 15:  # 最多添加15个相关标签页
-                    break
-    
-    # 如果没有找到足够相关的标签页，使用其他策略
-    if len(relevant_tabs) < 3:
-        logger.debug(f"未找到足够的相关标签页，尝试其他匹配方法")
-        
-        # 尝试基于关键词匹配
-        if window_keywords:
-            keyword_tabs = []
-            for tab in all_tabs:
-                if tab in relevant_tabs:
-                    continue
-                    
-                tab_title = tab.get("title", "").lower()
-                for keyword in window_keywords:
-                    if keyword.lower() in tab_title:
-                        keyword_tabs.append(tab)
-                        logger.debug(f"基于关键词匹配添加标签页: {tab.get('title', '')[:30]}... (关键词: {keyword})")
-                        break
-            
-            # 添加基于关键词匹配的标签页
-            for tab in keyword_tabs[:5]:  # 最多添加5个关键词匹配的标签页
-                if tab not in relevant_tabs:
-                    relevant_tabs.append(tab)
-        
-        # 如果仍然不够，添加最近的几个标签页
-        if len(relevant_tabs) < 3:
-            logger.debug(f"关键词匹配标签页不足，添加最近标签页")
-            recent_tabs_added = 0
-            for tab in all_tabs:
-                if tab not in relevant_tabs:
-                    relevant_tabs.append(tab)
-                    recent_tabs_added += 1
-                    logger.debug(f"添加最近标签页: {tab.get('title', '')[:30]}...")
-                    if recent_tabs_added >= 5:  # 最多添加5个最近的标签页
-                        break
-    
-    logger.info(f"窗口 '{window_title}' 最终匹配到 {len(relevant_tabs)} 个标签页")
-    
-    # 对匹配到的标签页进行去重
-    unique_tabs = []
-    seen_urls = set()
-    
-    for tab in relevant_tabs:
-        url = tab.get("url", "")
-        if url and url not in seen_urls:
-            seen_urls.add(url)
-            unique_tabs.append(tab)
-    
-    return unique_tabs[:20]  # 最多返回20个标签页
+    # 方法3: 如果都失败了，返回默认标签页
+    logger.warning(f"所有采集方法都失败，返回默认标签页")
+    return [{"title": "新标签页", "url": "about:newtab", "source": "fallback"}]
 
 def extract_keywords(text):
     """从文本中提取关键词"""
