@@ -21,6 +21,8 @@ import subprocess
 import socket
 import time
 import threading
+from session_manager.browser_collectors import chrome_collector, firefox_collector, opera_collector
+from session_manager.utils import get_valid_data_path
 
 logger = logging.getLogger(__name__)
 
@@ -560,46 +562,26 @@ def collect_all_browser_tabs():
 def get_browser_tabs(browser_process_path, window_title, config):
     """
     获取特定浏览器窗口的标签页信息
-    
     参数:
         browser_process_path: 浏览器进程路径
         window_title: 窗口标题
         config: 配置信息
-        
     返回:
         标签页URL列表
     """
     browser_exe = os.path.basename(browser_process_path).lower()
-    
     logger.info(f"开始获取浏览器标签页: {browser_exe}, 窗口标题: {window_title}")
-    
     if browser_exe not in BROWSER_PROFILES:
         logger.warning(f"不支持的浏览器: {browser_exe}")
         return []
-    
-    # 获取浏览器窗口特定PID和窗口句柄
-    browser_pid, window_hwnd = get_browser_pid(browser_process_path, window_title)
-    if not browser_pid:
-        logger.warning(f"无法获取浏览器PID: {window_title}")
-        return []
-    
-    logger.info(f"成功获取浏览器PID: {browser_pid}, 窗口句柄: {window_hwnd}")
-    
-    # 根据浏览器类型选择不同的标签页获取方法
+    browser_profiles = BROWSER_PROFILES
     if browser_exe in ["chrome.exe", "msedge.exe", "brave.exe"]:
-        # 获取特定窗口的标签页
-        tabs = get_chromium_tabs_for_window(browser_exe, browser_pid, window_title, window_hwnd)
-        logger.info(f"获取到 {len(tabs)} 个Chrome标签页")
-        return tabs
+        # 只传递必要参数，主调度调用子模块
+        return chrome_collector.get_chromium_tabs_for_window(browser_exe, window_title, browser_profiles)
     elif browser_exe == "firefox.exe":
-        tabs = get_firefox_tabs_for_window(browser_pid, window_title)
-        logger.info(f"获取到 {len(tabs)} 个Firefox标签页")
-        return tabs
+        return firefox_collector.get_firefox_tabs_for_window(None, window_title, browser_profiles)
     elif browser_exe == "opera.exe":
-        tabs = get_opera_tabs_for_window(browser_pid, window_title)
-        logger.info(f"获取到 {len(tabs)} 个Opera标签页")
-        return tabs
-    
+        return opera_collector.get_opera_tabs_for_window(None, window_title, browser_profiles)
     return []
 
 def get_browser_pid(browser_process_path, window_title):

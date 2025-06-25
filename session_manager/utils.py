@@ -7,6 +7,7 @@ import os
 import sys
 import ctypes
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -119,4 +120,21 @@ def get_browser_tabs(browser_process_path, window_title, config):
         return get_tabs_impl(browser_process_path, window_title, config)
     except Exception as e:
         logger.error(f"获取浏览器标签页时出错: {e}", exc_info=True)
-        return [] 
+        return []
+
+def get_valid_data_path(browser_exe: str, browser_profiles: dict) -> Optional[str]:
+    """
+    获取有效的浏览器数据路径
+    :param browser_exe: 浏览器可执行文件名（如 chrome.exe）
+    :param browser_profiles: 浏览器配置信息字典
+    :return: 有效数据路径或None
+    """
+    if browser_exe not in browser_profiles:
+        return None
+    info = browser_profiles[browser_exe]
+    for path in info.get("data_paths", []):
+        if os.path.exists(path):
+            logger.info(f"找到{browser_exe}数据路径: {path}")
+            return path
+    logger.warning(f"未找到{browser_exe}的有效数据路径")
+    return None 
